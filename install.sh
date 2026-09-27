@@ -5,7 +5,7 @@ trap 'echo "❌ Installer failed at line $LINENO" >&2' ERR
 if [ "$(id -u)" -ne 0 ]; then echo "❌ Run this installer as root"; exit 1; fi
 if ! command -v apt-get >/dev/null 2>&1; then echo "❌ Debian/Ubuntu (apt) is required"; exit 1; fi
 # ============================================
-# OutlineParsian Ultimate Panel - Production Final v8
+# OutlineParsian Ultimate Panel - Production Final v8.1.1
 # All Features | All Bugs Fixed | Production Ready
 # SSH Traffic Counting + Xray Traffic
 # Iran Block: Only outbound traffic to Iran blocked (inbound allowed)
