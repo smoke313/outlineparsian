@@ -5,7 +5,7 @@ trap 'echo "❌ Installer failed at line $LINENO" >&2' ERR
 if [ "$(id -u)" -ne 0 ]; then echo "❌ Run this installer as root"; exit 1; fi
 if ! command -v apt-get >/dev/null 2>&1; then echo "❌ Debian/Ubuntu (apt) is required"; exit 1; fi
 # ============================================
-# OutlineParsian Ultimate Panel - Production Final v8.2
+# OutlineParsian Ultimate Panel - Production Final v8.3 Performance
 # All Features | All Bugs Fixed | Production Ready
 # SSH Traffic Counting + Xray Traffic
 # Iran Block: Only outbound traffic to Iran blocked (inbound allowed)
@@ -129,6 +129,26 @@ echo "✓ Xray Core + gRPC installed"
 # ============================================
 # STEP 5: Initialize Database
 # ============================================
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo " OutlineParsian Panel Port"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+read -r -p "Enter panel port [5000]: " USER_PANEL_PORT
+PANEL_PORT=${USER_PANEL_PORT:-5000}
+
+if ! [[ "$PANEL_PORT" =~ ^[0-9]+$ ]] || [ "$PANEL_PORT" -lt 1024 ] || [ "$PANEL_PORT" -gt 65535 ]; then
+    echo "Invalid port. Using default 5000"
+    PANEL_PORT=5000
+fi
+
+if ss -tulpn | grep -q ":$PANEL_PORT "; then
+    echo "Port $PANEL_PORT is already in use. Using 5000"
+    PANEL_PORT=5000
+fi
+
+echo "✓ Panel port selected: $PANEL_PORT"
+
 echo "[5/16] Initializing database..."
 rm -f /tmp/outlineparsian_new_admin
 if [ -f /root/ssh-panel/panel.db ]; then
