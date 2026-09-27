@@ -745,10 +745,20 @@ def generate_xray_config():
     try: old=open(XRAY_CONFIG,'r').read()
     except Exception: pass
     if old==new: return False
-    tmp=XRAY_CONFIG+'.candidate'
+    tmp=XRAY_CONFIG+'.candidate.json'
     backup=XRAY_CONFIG+'.lastgood'
-    with open(tmp,'w') as f: f.write(new)
-    test=run_command([XRAY_BIN,'run','-test','-c',tmp],timeout=20)
+    with open(tmp,'w') as f:
+        f.write(new)
+
+    # Validate generated JSON before passing it to Xray
+    try:
+        json.loads(new)
+    except Exception as e:
+        try: os.remove(tmp)
+        except: pass
+        raise ValueError('Generated Xray JSON is invalid: '+str(e))
+
+    test=run_command([XRAY_BIN,'run','-test','-format','json','-c',tmp],timeout=20)
     if not test or test.returncode!=0:
         err=((test.stderr if test else b'') or (test.stdout if test else b'')).decode(errors='ignore')[-2000:]
         try: os.remove(tmp)
