@@ -66,6 +66,7 @@ echo "✓ Prerequisites installed"
 # STEP 2: SSH Configuration
 # ============================================
 echo "[2/16] Configuring SSH safely..."
+echo "Firewall configuration started"
 mkdir -p /etc/ssh/sshd_config.d
 if [ -f /etc/ssh/sshd_config ] && [ ! -f /etc/ssh/sshd_config.outlineparsian.bak ]; then
     cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.outlineparsian.bak
@@ -89,8 +90,7 @@ if ! /usr/sbin/sshd -t; then
     [ -f /etc/ssh/sshd_config.outlineparsian.bak ] && cp -a /etc/ssh/sshd_config.outlineparsian.bak /etc/ssh/sshd_config
     exit 1
 fi
-systemctl enable ssh
-systemctl reload ssh || true
+timeout 15 systemctl enable ssh || true
+timeout 15 systemctl reload ssh || true
 for p in 22 80 443 ${PANEL_PORT:-5000}; do
     iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
-done
