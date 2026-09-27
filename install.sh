@@ -5,7 +5,7 @@ trap 'echo "❌ Installer failed at line $LINENO" >&2' ERR
 if [ "$(id -u)" -ne 0 ]; then echo "❌ Run this installer as root"; exit 1; fi
 if ! command -v apt-get >/dev/null 2>&1; then echo "❌ Debian/Ubuntu (apt) is required"; exit 1; fi
 # ============================================
-# OutlineParsian Ultimate Panel - Production Final v8.1.1
+# OutlineParsian Ultimate Panel - Production Final v8.2
 # All Features | All Bugs Fixed | Production Ready
 # SSH Traffic Counting + Xray Traffic
 # Iran Block: Only outbound traffic to Iran blocked (inbound allowed)
@@ -34,7 +34,24 @@ echo ""
 # ============================================
 # STEP 1: System Update & Prerequisites
 # ============================================
-echo "[1/16] Updating system and installing prerequisites..."
+echo "[1/16] Preparing system and installing prerequisites..."
+
+echo ""
+echo "⚡ System package update is optional."
+echo "Recommended before installation:"
+echo "apt update && apt upgrade -y"
+echo ""
+
+read -r -p "Do you want to update Ubuntu packages now? [y/N]: " UPDATE_SYSTEM
+
+if [[ "${UPDATE_SYSTEM,,}" == "y" ]]; then
+    echo "Updating system packages..."
+    apt update -y
+    apt upgrade -y
+else
+    echo "Skipping system upgrade. Continuing installation..."
+fi
+
 apt update -y
 apt install -y python3 python3-pip python3-venv nginx ipset iptables curl netfilter-persistent iptables-persistent unzip wget sqlite3 net-tools jq certbot python3-certbot-nginx qrencode openssh-server chrony cron
 true # Python dependencies are installed in the panel virtualenv below
@@ -745,19 +762,17 @@ def generate_xray_config():
     try: old=open(XRAY_CONFIG,'r').read()
     except Exception: pass
     if old==new: return False
-    tmp=XRAY_CONFIG+'.candidate.json'
+    tmp='/tmp/xray_candidate.json'
     backup=XRAY_CONFIG+'.lastgood'
     with open(tmp,'w') as f:
         f.write(new)
 
-    # Validate generated JSON before passing it to Xray
     try:
         json.loads(new)
     except Exception as e:
         try: os.remove(tmp)
         except: pass
         raise ValueError('Generated Xray JSON is invalid: '+str(e))
-
     test=run_command([XRAY_BIN,'run','-test','-format','json','-c',tmp],timeout=20)
     if not test or test.returncode!=0:
         err=((test.stderr if test else b'') or (test.stdout if test else b'')).decode(errors='ignore')[-2000:]
