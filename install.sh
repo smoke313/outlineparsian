@@ -1,5 +1,8 @@
 #!/bin/bash
+# OutlineParsian v8.6 Stable Installer
+# SSH-safe execution, logging and recovery improvements
 set -Eeuo pipefail
+exec > >(tee -a /root/outlineparsian-install.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 trap 'echo "❌ Installer failed at line $LINENO" >&2' ERR
 if [ "$(id -u)" -ne 0 ]; then echo "❌ Run this installer as root"; exit 1; fi
@@ -87,9 +90,7 @@ if ! /usr/sbin/sshd -t; then
     exit 1
 fi
 systemctl enable ssh
-systemctl restart ssh
+systemctl reload ssh || true
 for p in 22 80 443 ${PANEL_PORT:-5000}; do
     iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
 done
-netfilter-persistent save >/dev/null 2>&1 || true
-echo "✓ SSH and panel web ports configured safely"
