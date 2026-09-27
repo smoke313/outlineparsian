@@ -5,7 +5,7 @@ trap 'echo "❌ Installer failed at line $LINENO" >&2' ERR
 if [ "$(id -u)" -ne 0 ]; then echo "❌ Run this installer as root"; exit 1; fi
 if ! command -v apt-get >/dev/null 2>&1; then echo "❌ Debian/Ubuntu (apt) is required"; exit 1; fi
 # ============================================
-# OutlineParsian Ultimate Panel - Production Final v8.3 Performance
+# OutlineParsian Ultimate Panel - Production Final v8.4 Port Auth
 # All Features | All Bugs Fixed | Production Ready
 # SSH Traffic Counting + Xray Traffic
 # Iran Block: Only outbound traffic to Iran blocked (inbound allowed)
@@ -149,6 +149,34 @@ fi
 
 echo "✓ Panel port selected: $PANEL_PORT"
 
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo " OutlineParsian Panel Setup"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+read -r -p "Panel port [5000]: " INPUT_PANEL_PORT
+PANEL_PORT=${INPUT_PANEL_PORT:-5000}
+
+if ! [[ "$PANEL_PORT" =~ ^[0-9]+$ ]] || [ "$PANEL_PORT" -lt 1024 ] || [ "$PANEL_PORT" -gt 65535 ]; then
+    echo "Invalid port. Using 5000"
+    PANEL_PORT=5000
+fi
+
+read -r -p "Panel username [admin]: " PANEL_ADMIN_USERNAME
+PANEL_ADMIN_USERNAME=${PANEL_ADMIN_USERNAME:-admin}
+
+while true; do
+    read -rs -p "Panel password: " PANEL_ADMIN_PASSWORD
+    echo
+    if [ ${#PANEL_ADMIN_PASSWORD} -ge 8 ]; then
+        break
+    fi
+    echo "Password must be at least 8 characters."
+done
+
+export PANEL_PORT PANEL_ADMIN_USERNAME PANEL_ADMIN_PASSWORD
+
 echo "[5/16] Initializing database..."
 rm -f /tmp/outlineparsian_new_admin
 if [ -f /root/ssh-panel/panel.db ]; then
@@ -195,11 +223,11 @@ for name,ddl in [
 initial_password=None
 existing_admin=c.execute("SELECT value FROM settings WHERE key='admin_password'").fetchone()
 if existing_admin is None or existing_admin[0]=='admin123':
-    initial_password=secrets.token_urlsafe(14)
+    initial_password=os.environ.get('PANEL_ADMIN_PASSWORD') or secrets.token_urlsafe(14)
     admin_hash=generate_password_hash(initial_password)
 else:
     admin_hash=existing_admin[0]
-defaults=[('domain',''),('admin_username','admin'),('admin_password',admin_hash),('block_iran_client','0'),('panel_port','5000'),('reality_public_key',''),('reality_private_key',''),('ssl_domain',''),('ssl_status','none'),('tls_cert_file',''),('tls_key_file','')]
+defaults=[('domain',''),('admin_username',os.environ.get('PANEL_ADMIN_USERNAME','admin')),('admin_password',admin_hash),('block_iran_client','0'),('panel_port',os.environ.get('PANEL_PORT','5000')),('reality_public_key',''),('reality_private_key',''),('ssl_domain',''),('ssl_status','none'),('tls_cert_file',''),('tls_key_file','')]
 for k,v in defaults:c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",(k,v))
 if existing_admin is not None and existing_admin[0]=='admin123':
     c.execute("UPDATE settings SET value=? WHERE key='admin_password'",(admin_hash,))
@@ -505,7 +533,7 @@ def ensure_schema():
                 c.execute(ddl)
         c.execute("CREATE TABLE IF NOT EXISTS ssh_counters (session_key TEXT PRIMARY KEY, username TEXT NOT NULL, tx_bytes INTEGER NOT NULL DEFAULT 0, rx_bytes INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0)")
         c.execute("CREATE TABLE IF NOT EXISTS xray_counters (stat_name TEXT PRIMARY KEY, username TEXT NOT NULL, byte_value INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0)")
-        runtime_defaults=[('domain',''),('admin_username','admin'),('block_iran_client','0'),('panel_port','5000'),('reality_public_key',''),('reality_private_key',''),('ssl_domain',''),('ssl_status','none'),('tls_cert_file',''),('tls_key_file','')]
+        runtime_defaults=[('domain',''),('admin_username',os.environ.get('PANEL_ADMIN_USERNAME','admin')),('block_iran_client','0'),('panel_port',os.environ.get('PANEL_PORT','5000')),('reality_public_key',''),('reality_private_key',''),('ssl_domain',''),('ssl_status','none'),('tls_cert_file',''),('tls_key_file','')]
         for k,v in runtime_defaults: c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)",(k,v))
         admin_pw=c.execute("SELECT value FROM settings WHERE key='admin_password'").fetchone()
         if admin_pw is None or admin_pw['value']=='admin123':
