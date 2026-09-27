@@ -685,6 +685,47 @@ def build_xray_config():
                 stream['tlsSettings']={'serverName':ib.get('server_name',''),'minVersion':'1.2','certificates':[{'certificateFile':cert,'keyFile':key}]}
             inbounds.append({'tag':ib['tag'],'port':ib['port'],'protocol':proto,'settings':settings,'streamSettings':stream})
             all_tags.append(ib['tag'])
+        # Fresh installation has no users/inbounds yet.
+        # Keep Xray bootstrap configuration valid until the first inbound is created.
+        if not inbounds:
+            return {
+                'log':{
+                    'loglevel':'warning',
+                    'access':'/var/log/xray/access.log',
+                    'error':'/var/log/xray/error.log'
+                },
+                'inbounds':[
+                    {
+                        'listen':'127.0.0.1',
+                        'port':10085,
+                        'protocol':'dokodemo-door',
+                        'tag':'api',
+                        'settings':{
+                            'address':'127.0.0.1'
+                        }
+                    }
+                ],
+                'api':{
+                    'tag':'api',
+                    'services':['StatsService']
+                },
+                'outbounds':[
+                    {
+                        'protocol':'freedom',
+                        'tag':'direct'
+                    }
+                ],
+                'stats':{},
+                'policy':{
+                    'levels':{
+                        '0':{
+                            'statsUserUplink':True,
+                            'statsUserDownlink':True
+                        }
+                    }
+                }
+            }
+
         cfg={
             'log':{'loglevel':'warning','access':'/var/log/xray/access.log','error':'/var/log/xray/error.log'},
             'inbounds':inbounds,
