@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # OutlineParsian Panel v3.8 -- complete, readable, single-file installer.
 # Reviewed against the supplied v3.7 script. All payload source follows below.
+# Backend fixes: scalable polling, authenticated SSH attribution, and live Xray online tracking.
+# Templates, CSS, JavaScript, branding and UI version are unchanged from the supplied file.
 #
 # ریشه‌یابی و اصلاحات:
 #  1. CRLF ورودی به LF تبدیل شده است؛ خطای نحوی Python در نسخهٔ ارسالی دیده نشد.
@@ -46,14 +48,14 @@
 # For HTTPS, set PANEL_PUBLIC_PORT=443 and PANEL_HTTPS_DOMAIN=your-domain with existing certs.
 # Existing public port/address/admin credentials are preserved unless explicitly supplied.
 # New installations print a random admin password; default admin123 is replaced.
-# Tested configuration target: official Xray v25.8.3. Existing newer compatible cores are reused.
+# Minimum/tested core: official Xray v26.3.27 (connection-refcount online stats). Newer cores are reused.
 # Reference: https://xtls.github.io/en/config/api.html
 #            https://xtls.github.io/en/config/policy.html
-#            https://github.com/XTLS/Xray-core/tree/v25.8.3
+#            https://github.com/XTLS/Xray-core/tree/v26.3.27
 set -Eeuo pipefail
 umask 077
 BASE=/root/ssh-panel
-XRAY_TESTED_VERSION=25.8.3
+XRAY_TESTED_VERSION=26.3.27
 STAGE=''
 BACKUP_DIR=''
 DEPLOYING=0
@@ -249,6 +251,10 @@ def online_data():
         data = json.loads(ONLINE_FILE.read_text())
         if time.time() - data['last_update'] > 20:
             return {'users': {}, 'stale': True}
+        # A failed online RPC is not a successful observation of zero users.
+        # Retain the collector's bounded cache and use the existing stale notice.
+        if not data.get('xray_online_ok', False):
+            data['stale'] = True
         return data
     except (OSError, ValueError, KeyError):
         return {'users': {}, 'stale': True}
@@ -1010,11 +1016,11 @@ def ensure_system_user(name, plain):
 def kill_ssh_session(pid, name):
     """Only terminate a verified child sshd session, never pkill a UID."""
     import psutil
+    from telemetry import ssh_username
     owned_account(name)
     try:
         proc = psutil.Process(int(pid))
-        text = ' '.join(proc.cmdline())
-        if re.search(r'\bsshd:\s*' + re.escape(name) + r'(?:\s|@)', text) and proc.pid != os.getpid():
+        if proc.pid != os.getpid() and ssh_username(proc.pid, {name}) == name:
             proc.terminate()
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
@@ -1577,12 +1583,19 @@ message GetStatsOnlineIpListResponse {
   map<string, int64> ips = 2;
 }
 
+message GetAllOnlineUsersRequest {}
+
+message GetAllOnlineUsersResponse {
+  repeated string users = 1;
+}
+
 service StatsService {
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse) {}
   rpc GetStatsOnline(GetStatsRequest) returns (GetStatsResponse) {}
   rpc QueryStats(QueryStatsRequest) returns (QueryStatsResponse) {}
   rpc GetSysStats(SysStatsRequest) returns (SysStatsResponse) {}
   rpc GetStatsOnlineIpList(GetStatsRequest) returns (GetStatsOnlineIpListResponse) {}
+  rpc GetAllOnlineUsers(GetAllOnlineUsersRequest) returns (GetAllOnlineUsersResponse) {}
 }
 
 message Config {}
@@ -1934,12 +1947,32 @@ import ipaddress
 import re
 import time
 import logging
+import subprocess
+import threading
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import grpc
 import psutil
 
 from common import API_ADDR, MiB, XRAY_BIN, log, run
+
+ONLINE_BUDGET = 5.0
+ONLINE_TIMEOUT = 2.0
+ONLINE_CONCURRENCY = 8
+ONLINE_CACHE_TTL = 20.0
+_online_cache = {}
+_online_offset = 0
+_ssh_parent_cache = (0, None)
+_ssh_parent_cache_lock = threading.Lock()
+
+
+def _cached_online(permitted, now):
+    for user, (seen, _) in list(_online_cache.items()):
+        if user not in permitted or now - seen > ONLINE_CACHE_TTL:
+            _online_cache.pop(user, None)
+    return {user: dict(_online_cache.get(user, (0, {}))[1]) for user in permitted}
 
 
 def generation():
@@ -1949,6 +1982,9 @@ def generation():
             return None
         proc = psutil.Process(pid)
         return f'{pid}:{proc.create_time():.6f}'
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning('Xray process lookup failed (%s)', type(exc).__name__)
+        return None
     except (ValueError, RuntimeError, psutil.Error):
         return None
 
@@ -2001,35 +2037,118 @@ def capture_xray(conn):
 
 
 def xray_online(users):
+    """Read live refcounted IPs (Xray >=26.3.27), with a bounded RPC budget.
+
+    last_seen is a connection's timestamp, not a heartbeat. The core removes
+    an IP only after its final connection closes; aging it here loses tunnels.
+    A failed RPC may reuse a successful snapshot for at most twenty seconds.
+    """
+    global _online_offset
+    permitted = set(users)
+    now = time.monotonic()
+    result = _cached_online(permitted, now)
+    if not permitted:
+        return result, True
     pb = importlib.import_module('stats_pb2')
     rpc = importlib.import_module('stats_pb2_grpc')
-    result, healthy = {}, True
-    now = time.time()
+    deadline = now + ONLINE_BUDGET
+    healthy = True
     with grpc.insecure_channel(API_ADDR) as channel:
         stub = rpc.StatsServiceStub(channel)
-        for user in users:
+        try:
+            online = stub.GetAllOnlineUsers(pb.GetAllOnlineUsersRequest(),
+                                            timeout=min(ONLINE_TIMEOUT, max(0.001, deadline - time.monotonic())))
+        except grpc.RpcError as exc:
+            log.warning('Xray online user API unavailable (%s)', exc.code())
+            return _cached_online(permitted, time.monotonic()), False
+        active = set()
+        for counter in online.users:
+            parts = counter.split('>>>')
+            if len(parts) == 3 and parts[0] == 'user' and parts[2] == 'online' and parts[1] in permitted:
+                active.add(parts[1])
+        for user in permitted - active:
+            _online_cache.pop(user, None)
+            result[user] = {}
+        if not active:
+            return result, True
+
+        def read_ips(user):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
             try:
-                resp = stub.GetStatsOnlineIpList(pb.GetStatsRequest(name=f'user>>>{user}>>>online'), timeout=2)
-                addresses = {}
-                for address, seen in resp.ips.items():
-                    try:
-                        address = normalized_ip(address)
-                    except ValueError:
-                        continue
-                    if -5 <= now - seen <= 20:
-                        addresses[address] = seen
-                result[user] = addresses
+                return stub.GetStatsOnlineIpList(pb.GetStatsRequest(name=f'user>>>{user}>>>online'),
+                                                timeout=min(ONLINE_TIMEOUT, remaining))
             except grpc.RpcError as exc:
-                if exc.code() != grpc.StatusCode.NOT_FOUND:
+                if exc.code() == grpc.StatusCode.NOT_FOUND:
+                    # The final connection may close between the two RPCs.
+                    return pb.GetStatsOnlineIpListResponse()
+                raise
+
+        # Submit only the current batch, never queue every account in the pool.
+        ordered = sorted(active)
+        offset = _online_offset % len(ordered)
+        ordered = ordered[offset:] + ordered[:offset]
+        submitted = 0
+        failures = set()
+        pending = {}
+        iterator = iter(ordered)
+        pool = ThreadPoolExecutor(max_workers=min(ONLINE_CONCURRENCY, len(ordered)))
+        try:
+            for _ in range(min(ONLINE_CONCURRENCY, len(ordered))):
+                user = next(iterator)
+                pending[pool.submit(read_ips, user)] = user
+                submitted += 1
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     healthy = False
-                    log.warning('Xray online API unavailable (%s)', exc.code())
                     break
-                result[user] = {}
-    return result, healthy
+                completed, _ = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+                if not completed:
+                    healthy = False
+                    break
+                for future in completed:
+                    user = pending.pop(future)
+                    try:
+                        response = future.result()
+                        if response is None:
+                            healthy = False
+                        else:
+                            addresses = {}
+                            for address, seen in response.ips.items():
+                                try:
+                                    address = normalized_ip(address)
+                                except ValueError:
+                                    continue
+                                addresses[address] = seen
+                            result[user] = addresses
+                            _online_cache[user] = (time.monotonic(), dict(addresses))
+                    except grpc.RpcError as exc:
+                        healthy = False
+                        failures.add(str(exc.code()))
+                    next_user = next(iterator, None)
+                    if next_user is not None:
+                        if time.monotonic() < deadline:
+                            pending[pool.submit(read_ips, next_user)] = next_user
+                            submitted += 1
+                        else:
+                            healthy = False
+            if pending:
+                # Closing the shared channel cancels outstanding RPCs promptly.
+                channel.close()
+        finally:
+            _online_offset = (offset + submitted) % len(ordered)
+            pool.shutdown(wait=True, cancel_futures=True)
+        if not healthy:
+            log.warning('Xray online IP snapshot incomplete (%s)', ', '.join(sorted(failures)) or 'cycle deadline')
+    # A slow collection must not extend the cache's twenty-second bound.
+    return _cached_online(permitted, time.monotonic()), healthy
 
 
 def normalized_ip(value):
-    parsed = ipaddress.ip_address(value.split('%', 1)[0])
+    # Xray's IPv6 Address.String() includes brackets; ss may add a scope ID.
+    parsed = ipaddress.ip_address(value.strip('[]').split('%', 1)[0])
     return str(parsed.ipv4_mapped) if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped else str(parsed)
 
 
@@ -2039,43 +2158,155 @@ def endpoint(value):
     return normalized_ip(address.strip('[]')), int(port)
 
 
-def ssh_username(pid, permitted):
+def _ssh_child_pids(pid):
+    """Read one Linux task's children without psutil's host-wide PPID scan.
+
+    The installer targets Debian/Ubuntu Linux. OpenSSH forks its session
+    children from the main task. Some container kernels omit this proc file;
+    None asks the caller for its lazily built snapshot fallback.
+    """
+    try:
+        with Path(f'/proc/{int(pid)}/task/{int(pid)}/children').open('r', encoding='ascii') as handle:
+            return [int(value) for value in handle.read(4096).split() if value.isdigit()][:32]
+    except (OSError, ValueError):
+        return None
+
+
+def _ssh_parent_map():
+    parents = {}
+    for proc in psutil.process_iter(attrs=['pid', 'ppid']):
+        info = proc.info
+        pid, parent = info.get('pid'), info.get('ppid')
+        if isinstance(pid, int) and isinstance(parent, int) and pid > 0 and parent > 0:
+            parents.setdefault(parent, []).append(pid)
+    return parents
+
+
+def _ssh_snapshot_children():
+    """A fallback process scan, if required, belongs to the entire snapshot."""
+    fallback = None
+
+    def children(pid):
+        nonlocal fallback
+        global _ssh_parent_cache
+        direct = _ssh_child_pids(pid)
+        if direct is not None:
+            return direct
+        if fallback is None:
+            fallback = _ssh_parent_map()
+            with _ssh_parent_cache_lock:
+                _ssh_parent_cache = (time.monotonic(), fallback)
+        return fallback.get(pid, [])[:32]
+
+    return children
+
+
+def _ssh_shared_children(pid):
+    """Standalone session termination shares a fallback map for five seconds."""
+    global _ssh_parent_cache
+    direct = _ssh_child_pids(pid)
+    if direct is not None:
+        return direct
+    with _ssh_parent_cache_lock:
+        stamp, parents = _ssh_parent_cache
+        if parents is None or time.monotonic() - stamp >= 5:
+            parents = _ssh_parent_map()
+            _ssh_parent_cache = (time.monotonic(), parents)
+    return parents.get(pid, [])[:32]
+
+
+def ssh_username(pid, permitted, child_reader=None):
+    """Attribute only authenticated user-owned OpenSSH session processes.
+
+    A root [priv] monitor can own the socket even after authentication. Its
+    authenticated child identifies the account; its title alone cannot, since
+    OpenSSH sets both [priv] and [net] titles before checking credentials.
+    """
+    def authenticated(proc):
+        if proc.name() not in ('sshd', 'sshd-session'):
+            return None
+        owner = proc.username()
+        if owner not in permitted:
+            return None
+        text = ' '.join(proc.cmdline()).strip()
+        if re.search(r'\[(?:net|priv|preauth|accepted|rexeced)\]', text):
+            return None
+        match = re.search(r'\bsshd(?:-session)?:\s*([a-z][a-z0-9_-]*)(?=\s|@|$)', text)
+        return owner if match and match[1] == owner else None
+
     try:
         proc = psutil.Process(pid)
+        user = authenticated(proc)
+        if user:
+            return user
+        if proc.name() not in ('sshd', 'sshd-session') or proc.username() != 'root':
+            return None
         text = ' '.join(proc.cmdline())
-        match = re.search(r'\bsshd:\s*([a-z][a-z0-9_-]*)(?:\s|@)', text)
-        if match and match[1] in permitted:
-            return match[1]
-        if proc.username() in permitted and proc.name() in ('sshd', 'sshd-session'):
-            return proc.username()
+        match = re.search(r'\bsshd(?:-session)?:\s*([a-z][a-z0-9_-]*)\s+\[priv\]', text)
+        if not match or match[1] not in permitted:
+            return None
+        child_reader = child_reader or _ssh_shared_children
+        pending = deque([(int(pid), 0)])
+        visited = {int(pid)}
+        while pending and len(visited) < 32:
+            parent_pid, depth = pending.popleft()
+            if depth >= 4:
+                continue
+            for child_pid in child_reader(parent_pid):
+                if child_pid in visited:
+                    continue
+                if len(visited) >= 32:
+                    break
+                visited.add(child_pid)
+                try:
+                    child = psutil.Process(child_pid)
+                    # PID reuse or a stale standalone cache must not attribute
+                    # a session which no longer belongs to this monitor.
+                    if child.ppid() != parent_pid:
+                        continue
+                    if child.name() not in ('sshd', 'sshd-session'):
+                        continue
+                    user = authenticated(child)
+                    if user == match[1]:
+                        return user
+                    pending.append((child_pid, depth + 1))
+                except psutil.Error:
+                    continue
     except psutil.Error:
         pass
     return None
 
 
-def parse_ss(text, permitted, resolver=ssh_username, ssh_port=22):
+def parse_ss(text, permitted, resolver=None, ssh_port=22):
     """Split by endpoint patterns, not fixed offsets; multiple PID owners deduplicate by inode."""
     sessions = {}
+    if resolver is None:
+        child_reader = _ssh_snapshot_children()
+        resolver = lambda pid, users: ssh_username(pid, users, child_reader)
+    pid_users = {}
     current = None
     for line in text.splitlines():
-        if line and not line[0].isspace():
+        fields = line.split()
+        endpoints = []
+        for item in fields:
+            try:
+                endpoints.append(endpoint(item))
+            except (ValueError, IndexError):
+                continue
+            if len(endpoints) == 2:
+                break
+        if len(endpoints) == 2:
             current = None
-            fields = line.split()
-            endpoints = []
-            for item in fields:
-                try:
-                    endpoints.append(endpoint(item))
-                except (ValueError, IndexError):
-                    continue
-                if len(endpoints) == 2:
-                    break
-            if len(endpoints) != 2 or endpoints[0][1] != ssh_port:
+            if endpoints[0][1] != ssh_port:
                 continue
             name, pid = None, None
             for ident in re.findall(r'pid=(\d+)', line):
-                resolved = resolver(int(ident), permitted)
+                ident = int(ident)
+                if ident not in pid_users:
+                    pid_users[ident] = resolver(ident, permitted)
+                resolved = pid_users[ident]
                 if resolved:
-                    name, pid = resolved, int(ident)
+                    name, pid = resolved, ident
                     break
             if not name:
                 continue
@@ -2089,6 +2320,9 @@ def parse_ss(text, permitted, resolver=ssh_username, ssh_port=22):
             current = {'key': identity, 'username': name, 'pid': pid, 'ip': ip,
                        'bytes_acked': 0, 'bytes_received': 0, 'has_counters': False}
             sessions[identity] = current
+        elif fields and (fields[0] in ('ESTAB', 'LISTEN', 'SYN-SENT', 'SYN-RECV', 'CLOSE-WAIT')
+                         or len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit()):
+            current = None
         if current is not None:
             for name in ('bytes_acked', 'bytes_received'):
                 match = re.search(r'\b' + name + r':(\d+)', line)
@@ -2099,7 +2333,9 @@ def parse_ss(text, permitted, resolver=ssh_username, ssh_port=22):
 
 
 def ssh_snapshot(permitted, ssh_port=22):
-    result = run(['ss', '-Htnpie', 'state', 'established'], timeout=10)
+    if not permitted:
+        return []
+    result = run(['ss', '-Htnpie', 'state', 'established', f'( sport = :{int(ssh_port)} )'], timeout=10)
     return parse_ss(result.stdout, permitted, ssh_port=ssh_port)
 
 
@@ -2269,33 +2505,50 @@ import hashlib
 import hmac
 import json
 import logging
+import subprocess
 import time
+from pathlib import Path
 
 from common import (BASE, ONLINE_FILE, allowed, atomic_json, database, decrypt, ensure_system_user,
                     get_setting, kill_ssh_session, lock_system_user, log, owned_account, run, state_lock)
 from telemetry import capture_ssh, capture_xray, generation, ssh_snapshot, sweep_expired, xray_online
 from sync_xray import apply, base_rules, generate
 
-# v3.9 FIX: automatic database migration for older panel.db files
-def ensure_runtime_schema():
-    with database() as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS counter_state (source TEXT NOT NULL, name TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0, value TEXT, PRIMARY KEY(source,name))")
-        conn.execute("CREATE TABLE IF NOT EXISTS runtime_state (key TEXT PRIMARY KEY, value TEXT)")
-
-
-ensure_runtime_schema()
-
-POLL = 15
+POLL = 5
+SSH_RECHECK = 60
+SSH_REPAIR_BUDGET = 1.0
+SSH_REPAIR_RETRY = 30
 first_seen = {}
 last_applied = None
+_ssh_reconciled = {}
+_ssh_repair_retry = {}
 
 
-def limit_plan(users, ssh, xray, now):
+def ensure_runtime_schema():
+    """Keep worker startup compatible with older databases without resetting state."""
+    with state_lock(), database() as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS counter_state ('
+                     'source TEXT, name TEXT, generation TEXT, value INTEGER, '
+                     'PRIMARY KEY(source,name))')
+        conn.execute('CREATE TABLE IF NOT EXISTS runtime_state (key TEXT PRIMARY KEY, value TEXT)')
+        conn.commit()
+
+
+def group_ssh(sessions):
+    grouped = {}
+    for session in sessions:
+        grouped.setdefault(session['username'], []).append(session)
+    return grouped
+
+
+def limit_plan(users, ssh, xray, now, *, ssh_by_user=None):
     global first_seen
+    if ssh_by_user is None:
+        ssh_by_user = group_ssh(ssh)
     active = {}
     for row in users:
         name = row['username']
-        addresses = set(xray.get(name, {})) | {s['ip'] for s in ssh if s['username'] == name}
+        addresses = set(xray.get(name, {})) | {s['ip'] for s in ssh_by_user.get(name, ())}
         prior = first_seen.get(name, {})
         times = {ip: prior.get(ip, now) for ip in addresses}
         if times:
@@ -2322,37 +2575,139 @@ def enforce_ip_rules(conn, blocked):
         last_applied = digest
 
 
-def reconcile_ssh(users, sessions):
+def shadow_statuses(names):
+    """Read lock/expiry flags once, without retaining or logging password hashes."""
+    statuses = {}
+    try:
+        with Path('/etc/shadow').open(encoding='utf-8') as handle:
+            for line in handle:
+                fields = line.rstrip('\n').split(':')
+                if len(fields) >= 8 and fields[0] in names:
+                    try:
+                        expiry = int(fields[7]) if fields[7] else -1
+                    except ValueError:
+                        continue
+                    statuses[fields[0]] = (fields[1].startswith(('!', '*')), expiry)
+    except OSError:
+        # The installed service runs as root. Unprivileged development cannot
+        # inspect shadow; ownership and the persistent change stamp still work.
+        pass
+    return statuses
+
+
+def reconcile_ssh(users, sessions, *, ssh_by_user=None, repair_budget=None):
+    global _ssh_reconciled, _ssh_repair_retry
+    if ssh_by_user is None:
+        ssh_by_user = group_ssh(sessions)
     key = (BASE / 'session.key').read_bytes()
+    credential = (BASE / 'credential.key').stat()
+    key_version = (key, credential.st_ino, credential.st_mtime_ns, credential.st_size)
+    now = time.monotonic()
+    deadline = None if repair_budget is None else now + repair_budget
     failures = []
+    updates = {}
+    # Expired/quota-disabled accounts are handled before password repair work.
+    classified = [(row, allowed(row)) for row in users]
+    ordered = [item for item in classified if not item[1]] + [item for item in classified if item[1]]
     with database() as conn:
-        for row in users:
+        stored = {row[0][4:]: row[1] for row in conn.execute(
+            "SELECT key,value FROM runtime_state WHERE key LIKE 'ssh-%'")}
+        due = {row['username'] for row, active in ordered
+               if row['username'] not in _ssh_reconciled
+               or _ssh_reconciled[row['username']][2] <= now}
+        statuses = shadow_statuses(due) if due else {}
+        today = int(time.time() // 86400)
+        for row, active in ordered:
             name = row['username']
             if row.get('disabled_reason') == 'unsafe legacy username':
                 continue
+            attempted_password = False
             try:
+                if not active:
+                    for session in ssh_by_user.get(name, ()):
+                        kill_ssh_session(session['pid'], name)
+                signature = (row['password'], active, key_version)
+                cached = _ssh_reconciled.get(name)
+                old = stored.get(name)
+                if cached and cached[0] == signature and cached[1] == old and cached[2] > now:
+                    continue
+                retry = _ssh_repair_retry.get(name)
+                if repair_budget is not None and retry and retry[0] == signature and retry[1] > now:
+                    if not active:
+                        lock_system_user(name, True)
+                    failures.append(name)
+                    continue
+                _ssh_repair_retry.pop(name, None)
                 plain = decrypt(row['password'])
                 # Username validation and ownership prevent modification of root/system users.
-                owned_account(name)
-                active = allowed(row)
+                account = owned_account(name)
                 stamp = hmac.new(key, (plain + ':' + str(active)).encode(), hashlib.sha256).hexdigest()
-                old = conn.execute('SELECT value FROM runtime_state WHERE key=?', ('ssh-' + name,)).fetchone()
-                created = ensure_system_user(name, plain)
-                if created or not old or old[0] != stamp:
-                    from common import set_system_password
-                    set_system_password(name, plain)
-                    lock_system_user(name, not active)
+                opposite = hmac.new(key, (plain + ':' + str(not active)).encode(), hashlib.sha256).hexdigest()
+                same_password = old in (stamp, opposite)
+                needs_password = account is None or not same_password
+                status = statuses.get(name)
+                wrong_status = (status is not None and
+                                ((active and (status[0] or status[1] != -1)) or
+                                 (not active and (not status[0] or not 0 <= status[1] <= today))))
+                locked_before = False
+                if not active and account is not None and (old != stamp or wrong_status):
+                    # A failed password reset must never leave an expired or
+                    # over-quota account unlocked while waiting for a retry.
+                    lock_system_user(name, True)
+                    locked_before = True
+                if needs_password and deadline is not None and time.monotonic() >= deadline:
+                    # Never delay disabling existing accounts or terminating
+                    # their sessions when startup has many password repairs.
+                    failures.append(name)
+                    continue
+                attempted_password = needs_password
+                created = ensure_system_user(name, plain) if account is None else False
+                password_repaired = created
+                if created or old != stamp:
+                    if not created and not same_password:
+                        from common import set_system_password
+                        set_system_password(name, plain)
+                        password_repaired = True
+                    # chpasswd replaces the shadow hash and can clear a prior
+                    # password lock; reapply disabled state after a reset.
+                    if not locked_before or password_repaired:
+                        lock_system_user(name, not active)
                     conn.execute('INSERT INTO runtime_state(key,value) VALUES(?,?) '
                                  'ON CONFLICT(key) DO UPDATE SET value=excluded.value', ('ssh-' + name, stamp))
-                if not active:
-                    for s in sessions:
-                        if s['username'] == name:
-                            kill_ssh_session(s['pid'], name)
-            except (ValueError, RuntimeError) as exc:
+                elif wrong_status and not locked_before:
+                    lock_system_user(name, not active)
+                updates[name] = (signature, stamp, time.monotonic() + SSH_RECHECK)
+            except (ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 log.error('SSH reconciliation failed for %s: %s', name, exc)
+                if attempted_password:
+                    # Budget is checked between commands. A single slow failed
+                    # repair must not consume every later cycle's budget.
+                    _ssh_repair_retry[name] = (signature, time.monotonic() + SSH_REPAIR_RETRY)
                 failures.append(name)
         conn.commit()
+    names = {row['username'] for row in users}
+    _ssh_reconciled = {name: value for name, value in _ssh_reconciled.items()
+                       if name in names and name not in failures}
+    _ssh_reconciled.update(updates)
+    _ssh_repair_retry = {name: value for name, value in _ssh_repair_retry.items() if name in names}
     return failures
+
+
+def publish_online(users, ssh_by_user, xray, *, xray_ok, online_ok):
+    online = {}
+    now = time.time()
+    for row in users:
+        name = row['username']
+        active = allowed(row)
+        user_ssh = ssh_by_user.get(name, ()) if active else ()
+        user_xray = set(xray.get(name, {})) if active else set()
+        ips = {s['ip'] for s in user_ssh} | user_xray
+        online[name] = {'ssh': bool(user_ssh), 'xray': bool(user_xray),
+                        'ssh_count': len(user_ssh), 'xray_ips': len(user_xray),
+                        'online_count': len(ips), 'is_online': bool(ips), 'ts': now}
+    atomic_json(ONLINE_FILE, {'last_update': now, 'users': online,
+                             'xray_traffic_ok': xray_ok, 'xray_online_ok': online_ok,
+                             'ssh_traffic': 'TCP snapshots (approximate)'})
 
 
 def poll():
@@ -2364,14 +2719,22 @@ def poll():
             users = [dict(r) for r in conn.execute('SELECT * FROM users')]
             names = {u['username'] for u in users}
             ssh = ssh_snapshot(names, int(get_setting('ssh_port', conn, '22')))
+            ssh_by_user = group_ssh(ssh)
             xray_ok = capture_xray(conn)
             capture_ssh(conn, ssh)
             # Sweep ALL users even when both SSH/Xray traffic snapshots are empty.
             changed = sweep_expired(conn)
             conn.commit()
             users = [dict(r) for r in conn.execute('SELECT * FROM users')]
-            xray, online_ok = xray_online([u['username'] for u in users if allowed(u)])
-            blocked = limit_plan(users, ssh, xray, time.time())
+            assigned = {r[0] for r in conn.execute(
+                'SELECT DISTINCT cl.username FROM xray_clients cl '
+                'JOIN xray_inbounds ib ON ib.id=cl.inbound_id WHERE cl.enable=1 AND ib.status=1')}
+            xray, online_ok = xray_online([u['username'] for u in users
+                                          if u['username'] in assigned and allowed(u)])
+            blocked = limit_plan(users, ssh, xray, time.time(), ssh_by_user=ssh_by_user)
+            # Publish the observed activity before slower configuration/account
+            # repairs so a large startup reconciliation cannot stale the UI.
+            publish_online(users, ssh_by_user, xray, xray_ok=xray_ok, online_ok=online_ok)
             if changed or get_setting('pending_xray_sync', conn) == '1':
                 apply(generate(conn))
                 from common import set_setting
@@ -2379,28 +2742,18 @@ def poll():
                 conn.commit()
             if online_ok:
                 enforce_ip_rules(conn, blocked)
-        reconcile_ssh(users, ssh)
-        for s in ssh:
-            if s['ip'] in blocked.get(s['username'], set()):
-                kill_ssh_session(s['pid'], s['username'])
-        online = {}
-        for row in users:
-            name = row['username']
-            user_ssh = [s for s in ssh if s['username'] == name]
-            user_xray = set(xray.get(name, {}))
-            ips = {s['ip'] for s in user_ssh} | user_xray
-            online[name] = {'ssh': bool(user_ssh), 'xray': bool(user_xray),
-                            'ssh_count': len(user_ssh), 'xray_ips': len(user_xray),
-                            'online_count': len(ips), 'is_online': bool(ips), 'ts': time.time()}
-        atomic_json(ONLINE_FILE, {'last_update': time.time(), 'users': online,
-                                 'xray_traffic_ok': xray_ok, 'xray_online_ok': online_ok,
-                                 'ssh_traffic': 'TCP snapshots (approximate)'})
+        reconcile_ssh(users, ssh, ssh_by_user=ssh_by_user, repair_budget=SSH_REPAIR_BUDGET)
+        if online_ok:
+            for s in ssh:
+                if s['ip'] in blocked.get(s['username'], set()):
+                    kill_ssh_session(s['pid'], s['username'])
     from system_config import apply_pending
     apply_pending()
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    ensure_runtime_schema()
     log.info('OutlineParsian 3.8 worker started; SSH counts bytes sampled from live TCP sockets')
     while True:
         try:
