@@ -1,31 +1,11 @@
 #!/bin/bash
-set -euo pipefail
-if [ "${1:-}" = --check ]; then
-    bash -n "$0"
-    python3 - "$0" <<'OP_CHECK_PY'
-import ast, pathlib, re, sys
-source = pathlib.Path(sys.argv[1]).read_text()
-count = 0
-for match in re.finditer(r"^cat << '([^']+)' > (\S+)\n(.*?)^\1$", source, re.M | re.S):
-    if match.group(2).strip('"').endswith('.py'):
-        ast.parse(match.group(3), filename=match.group(2))
-        count += 1
-print('Shell syntax and %d embedded Python modules OK' % count)
-OP_CHECK_PY
-    exit 0
-fi
-if [ "$EUID" -ne 0 ]; then echo "Run with sudo bash $0"; exit 1; fi
-if [ -f /root/ssh-panel/panel.db ]; then
-    echo "Existing panel detected. Run update-v3.7.sh; users and UI will be preserved."
-    exit 2
-fi
 # ============================================
 # OutlineParsian Ultimate Panel v3.7
-# v3.7 Backend Repair | CPU + Online status | Original templates preserved
+# Complete Installation | All Bugs Fixed
 # SSH + Xray Traffic | Accurate Online | IP-Based Limiter
 # ============================================
 
-clear 2>/dev/null || true
+clear
 cat << "BANNER"
    ____  _    _ _   _     _     ___  ____   ____   _    ____ ____  _    ____ _   _ 
   / __ \|  |  | \ | |   | |   / _ \|  _ \ / ___| | |  / ___| _ \/ \  / ___| \ | |
@@ -40,7 +20,7 @@ BANNER
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║   OutlineParsian Ultimate Panel v3.7                 ║"
-echo "║   Backend: CPU and Online Status Repair              ║"
+echo "║   Fixed: Syntax Error in Settings Route              ║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
 
@@ -48,8 +28,8 @@ echo ""
 # STEP 1: System Update & Prerequisites
 # ============================================
 echo "[1/16] Updating system and installing prerequisites..."
-apt update -y
-apt install -y iproute2 logrotate python3 python3-pip python3-venv nginx ipset iptables curl netfilter-persistent iptables-persistent unzip wget sqlite3 net-tools jq certbot python3-certbot-nginx python3-psutil python3-flask python3-requests qrencode openssh-server 2>/dev/null
+apt update -y && apt upgrade -y
+apt install -y python3 python3-pip python3-venv nginx ipset iptables curl netfilter-persistent iptables-persistent unzip wget sqlite3 net-tools jq certbot python3-certbot-nginx python3-psutil python3-flask python3-requests qrencode openssh-server 2>/dev/null
 pip3 install flask psutil requests grpcio grpcio-tools protobuf qrcode[pil] --break-system-packages 2>/dev/null || pip3 install flask psutil requests grpcio grpcio-tools protobuf qrcode[pil] 2>/dev/null
 echo "✓ Prerequisites installed"
 
@@ -99,24 +79,10 @@ package xray.app.stats.command;
 message QueryStatsRequest { string pattern = 1; bool reset = 2; }
 message Stat { string name = 1; int64 value = 2; }
 message QueryStatsResponse { repeated Stat stat = 1; }
-message GetStatsRequest { string name = 1; bool reset = 2; }
-message GetStatsOnlineIpListResponse { string name = 1; map<string, int64> ips = 2; }
-message GetAllOnlineUsersRequest {}
-message GetAllOnlineUsersResponse { repeated string users = 1; }
-message OnlineIPEntry { string ip = 1; int64 last_seen = 2; }
-message TrafficUserStat { int64 uplink = 1; int64 downlink = 2; }
-message UserStat { string email = 1; repeated OnlineIPEntry ips = 2; TrafficUserStat traffic = 3; }
-message GetUsersStatsRequest { bool include_traffic = 1; bool reset = 2; }
-message GetUsersStatsResponse { repeated UserStat users = 1; }
-service StatsService {
-  rpc QueryStats(QueryStatsRequest) returns (QueryStatsResponse);
-  rpc GetUsersStats(GetUsersStatsRequest) returns (GetUsersStatsResponse);
-  rpc GetAllOnlineUsers(GetAllOnlineUsersRequest) returns (GetAllOnlineUsersResponse);
-  rpc GetStatsOnlineIpList(GetStatsRequest) returns (GetStatsOnlineIpListResponse);
-}
+service StatsService { rpc QueryStats(QueryStatsRequest) returns (QueryStatsResponse); }
 PROTOEOF
 
-python3 -m grpc_tools.protoc -I/root/ssh-panel/grpc_proto --python_out=/root/ssh-panel/grpc_proto --grpc_python_out=/root/ssh-panel/grpc_proto /root/ssh-panel/grpc_proto/stats.proto
+cd /root/ssh-panel/grpc_proto && python3 -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. stats.proto 2>/dev/null && cd /root
 echo "✓ Xray Core + gRPC installed"
 
 # ============================================
@@ -126,7 +92,7 @@ echo "[5/16] Initializing database..."
 python3 << 'PYEOF'
 import sqlite3, os
 DB_PATH = "/root/ssh-panel/panel.db"
-if os.path.exists(DB_PATH): raise SystemExit('Existing database: use update-v3.7.sh')
+if os.path.exists(DB_PATH): os.rename(DB_PATH, DB_PATH + ".backup_old")
 conn = sqlite3.connect(DB_PATH)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA foreign_keys=ON")
@@ -137,10 +103,11 @@ c.execute('''CREATE TABLE IF NOT EXISTS xray_clients (id INTEGER PRIMARY KEY AUT
 c.execute('''CREATE TABLE IF NOT EXISTS user_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT, created_at TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS group_members (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, username TEXT, FOREIGN KEY (group_id) REFERENCES user_groups(id) ON DELETE CASCADE, FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE)''')
 c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-defaults = [('domain',''),('admin_username','admin'),('admin_password','admin123'),('block_iran_client','0'),('panel_port','5000'),('reality_public_key',''),('reality_private_key',''),('ssl_domain',''),('ssl_status','none')]
+defaults = [('domain',''),('admin_username','admin'),('admin_password','admin123'),('block_iran_client','0'),('panel_port','5000'),('reality_public_key',''),('reality_private_key',''),('ssl_domain',''),('ssl_status','none'),('panel_secret','')]
 for k,v in defaults: c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)",(k,v))
 c.execute("CREATE INDEX IF NOT EXISTS idx_clients_inbound ON xray_clients(inbound_id)")
 c.execute("CREATE INDEX IF NOT EXISTS idx_clients_username ON xray_clients(username)")
+conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('panel_secret','')")
 conn.commit()
 conn.close()
 print("✓ Database initialized")
@@ -152,11 +119,9 @@ PYEOF
 echo "[6/16] Creating Xray Sync Script..."
 cat << 'EOF' > /root/ssh-panel/sync_xray.py
 #!/usr/bin/env python3
-import sqlite3, json, os, subprocess, fcntl, tempfile
+import sqlite3, json, os, subprocess
 
-DB_PATH = '/root/ssh-panel/panel.db'
 XRAY_CONFIG = '/usr/local/etc/xray/config.json'
-XRAY_BIN = '/usr/local/bin/xray'
 
 def generate():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -196,7 +161,7 @@ def generate():
         
         for cl in clients_data:
             cl = dict(cl)
-            obj = {"id": cl['uuid'], "email": cl.get('email') or cl.get('username','')}
+            obj = {"id": cl['uuid'], "email": cl.get('email', cl.get('username',''))}
             if sec == "reality" and ib['protocol'] == 'vless': obj["flow"] = "xtls-rprx-vision"
             inbound_entry["settings"]["clients"].append(obj)
             
@@ -218,7 +183,7 @@ def generate():
         all_tags.append(ib['tag'])
         
     config = {
-        "log": {"loglevel":"warning", "access":"/tmp/xray_access.log", "error":"/tmp/xray_error.log"},
+        "log": {"loglevel":"info", "access":"/tmp/xray_access.log", "error":"/tmp/xray_error.log"},
         "inbounds": inbounds_config,
         "outbounds": [{"protocol":"freedom","tag":"direct"}, {"protocol":"blackhole","tag":"block"}, {"protocol":"blackhole","tag":"api"}],
         "routing": {"rules": [{"type":"field", "inboundTag":["api"], "outboundTag":"api"}] + ([{"type":"field", "inboundTag":all_tags, "outboundTag":"direct"}] if all_tags else [])},
@@ -226,53 +191,26 @@ def generate():
         "api": {"tag":"api","services":["StatsService"]},
         "policy": {
             "system": {
-                "statsInboundUplink": False,
-                "statsInboundDownlink": False,
-                "statsOutboundUplink": False,
-                "statsOutboundDownlink": False
+                "statsInboundUplink": True,
+                "statsInboundDownlink": True,
+                "statsOutboundUplink": True,
+                "statsOutboundDownlink": True
             },
             "levels": {
                 "0": {
                     "statsUserUplink": True,
-                    "statsUserDownlink": True,
-                    "statsUserOnline": True
+                    "statsUserDownlink": True
                 }
             }
         }
     }
+    with open(XRAY_CONFIG,'w') as f:
+        json.dump(config,f,indent=2)
     conn.close()
-    try:
-        with open(XRAY_CONFIG) as f:
-            if json.load(f) == config:
-                return False
-    except (OSError, ValueError):
-        pass
-    fd, temporary = tempfile.mkstemp(prefix='.config-', suffix='.json', dir=os.path.dirname(XRAY_CONFIG))
-    try:
-        with os.fdopen(fd, 'w') as f:
-            json.dump(config, f, indent=2)
-        os.chmod(temporary, 0o644)
-        subprocess.run([XRAY_BIN, 'run', '-test', '-config', temporary], check=True, timeout=15)
-        os.replace(temporary, XRAY_CONFIG)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-    return True
-
-
-def synchronize():
-    # Concurrent panel requests and quota checks cannot race config/restarts.
-    with open('/root/ssh-panel/sync_xray.lock', 'a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        pending = '/root/ssh-panel/.xray_restart_pending'
-        changed = generate()
-        if changed or os.path.exists(pending):
-            open(pending, 'a').close()
-            subprocess.run(['systemctl', 'restart', 'xray'], check=True, timeout=15)
-            os.unlink(pending)
 
 if __name__ == '__main__':
-    synchronize()
+    generate()
+    subprocess.run(["systemctl", "restart", "xray"])
 EOF
 chmod +x /root/ssh-panel/sync_xray.py
 echo "✓ Xray Sync Script created"
@@ -294,37 +232,19 @@ except:
     HAS_PSUTIL = False
 from flask import Flask, render_template_string, request, redirect, url_for, session, send_file, flash, Response, jsonify
 import logging
-import hashlib, pwd
-from logging.handlers import RotatingFileHandler
-from telemetry import SnapshotReader, online_view, atomic_json
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-                   handlers=[RotatingFileHandler('/var/log/panel.log', maxBytes=5*1024*1024, backupCount=3), logging.StreamHandler()])
+                   handlers=[logging.FileHandler('/var/log/panel.log'), logging.StreamHandler()])
 logger = logging.getLogger('OP')
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24).hex()
+app.secret_key = get_setting('panel_secret') if os.path.exists(DB_PATH) and get_setting('panel_secret') else os.urandom(32).hex()
 
 DB_PATH = '/root/ssh-panel/panel.db'
 XRAY_CONFIG = '/usr/local/etc/xray/config.json'
 XRAY_BIN = '/usr/local/bin/xray'
 DOWNLOADS_DIR = '/root/ssh-panel/downloads'
 ONLINE_FILE = '/tmp/online_users.json'
-online_reader = SnapshotReader(ONLINE_FILE)
-online_reader_lock = threading.Lock()
-PASSWORD_SYNC_FILE = '/root/ssh-panel/.password_sync.json'
-password_sync_lock = threading.Lock()
-
-def password_fingerprint(password):
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
-
-def password_sync_state():
-    try:
-        with open(PASSWORD_SYNC_FILE) as stream:
-            value = json.load(stream)
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
 
 if not os.path.exists(DOWNLOADS_DIR):
     os.makedirs(DOWNLOADS_DIR)
@@ -344,6 +264,9 @@ def update_system_stats():
         except:
             pass
         time.sleep(2)
+
+if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+    threading.Thread(target=update_system_stats, daemon=True).start()
 
 def get_cpu(): return system_stats.get('cpu', 0)
 def get_ram(): return system_stats.get('ram', 0)
@@ -381,22 +304,37 @@ def get_random_port():
     return random.randint(10000, 65000)
 
 def get_online_users():
-    with online_reader_lock:
-        return online_view(online_reader.read())
+    try:
+        with open(ONLINE_FILE) as f:
+            data = json.load(f)
+        now = time.time()
+        online = {}
+        for u, info in data.get('users', {}).items():
+            if now - info.get('ts', 0) > 60:
+                continue
+            ssh_count = info.get('ssh', 0)
+            is_xray = info.get('xray', False)
+            xray_ips = info.get('xray_ips', 0)
+            total_devices = ssh_count + xray_ips
+            if ssh_count > 0 or is_xray:
+                online[u] = {
+                    'ssh': ssh_count > 0,
+                    'xray': is_xray,
+                    'ssh_count': ssh_count,
+                    'xray_ips': xray_ips,
+                    'is_online': True,
+                    'online_count': total_devices
+                }
+        return online
+    except:
+        return {}
 
 def create_system_user(username, password):
     try:
-        try:
-            pwd.getpwnam(username)
-        except KeyError:
+        result = subprocess.run(['id', username], capture_output=True, timeout=5)
+        if result.returncode != 0:
             subprocess.run(['useradd', '-m', '-s', '/bin/bash', username], check=True, timeout=10)
-        if '\n' in username + password or '\r' in username + password:
-            return False
-        subprocess.run(['chpasswd'], input=username + ':' + password + '\n', text=True, check=True, timeout=5)
-        with password_sync_lock:
-            fingerprints = password_sync_state()
-            fingerprints[username] = password_fingerprint(password)
-            atomic_json(PASSWORD_SYNC_FILE, fingerprints)
+        subprocess.run(['chpasswd'], input=f'{username}:{password}\n', text=True, check=True, timeout=5)
         return True
     except:
         return False
@@ -447,7 +385,15 @@ def generate_qr_base64(data):
         except: return ""
 
 def sync_xray():
-    subprocess.run([sys.executable, "/root/ssh-panel/sync_xray.py"], check=True, timeout=40)
+    try:
+        subprocess.run(
+            ["python3", "/root/ssh-panel/sync_xray.py"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15
+        )
+    except Exception as e:
+        logger.error(f"Xray sync failed: {e}")
 
 def gen_link(proto,uid,dom,port,net,sec,sni,fp,sid,pub,path,user):
     if proto == 'vless':
@@ -490,19 +436,8 @@ def sync_users_from_db():
     try:
         c = conn.cursor()
         c.execute("SELECT username, password FROM users WHERE username != 'root'")
-        existing = {entry.pw_name for entry in pwd.getpwall()}
-        fingerprints = password_sync_state()
-        first_migration = not os.path.exists(PASSWORD_SYNC_FILE)
         for user in c.fetchall():
-            username, password = user['username'], user['password']
-            fingerprint = password_fingerprint(password)
-            if username in existing and (first_migration or fingerprints.get(username) == fingerprint):
-                fingerprints[username] = fingerprint
-                continue
-            if create_system_user(username, password):
-                fingerprints[username] = fingerprint
-        with password_sync_lock:
-            atomic_json(PASSWORD_SYNC_FILE, fingerprints)
+            create_system_user(user['username'], user['password'])
     except Exception as e:
         logger.error(f"Sync users error: {e}")
     finally:
@@ -522,12 +457,7 @@ def render_template(template_name, **kwargs):
     if os.path.exists(template_path):
         with open(template_path, 'r', encoding='utf-8') as f:
             template_content = f.read()
-        rendered = render_template_string(template_content, **kwargs)
-        if template_name == 'dashboard.html':
-            # Templates/CSS remain byte-for-byte unchanged; update only the
-            # existing status indicators and counters in place.
-            rendered = rendered.replace('</body>', '<script src="/static/online-status.js"></script></body>', 1)
-        return rendered
+        return render_template_string(template_content, **kwargs)
     return render_template_string("""
     <!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>Error</title>
     <style>body{background:#0a0a0a;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
@@ -582,7 +512,7 @@ def dashboard():
                 'is_online': is_ssh or is_xray,
                 'is_ssh_online': is_ssh,
                 'is_xray_online': is_xray,
-                'online_count': online_info.get('online_count', 0),
+                'online_count': ssh_count + xray_ips,
                 'sub_link': f"http://{dom}:{pp}/sub/{username}"
             })
         conn.close()
@@ -604,9 +534,7 @@ def api_stats():
 def api_online():
     if not session.get('logged_in'):
         return jsonify({'error': 'Unauthorized'}), 401
-    response = jsonify(get_online_users())
-    response.headers['Cache-Control'] = 'no-store'
-    return response
+    return jsonify(get_online_users())
 
 @app.route('/add_user_page')
 def add_user_page():
@@ -1145,7 +1073,6 @@ rm -f "{temp_path}"
     return redirect(url_for('settings'))
 
 if __name__=='__main__':
-    threading.Thread(target=update_system_stats, daemon=True).start()
     for lf in ['/tmp/xray_access.log','/tmp/xray_error.log','/var/log/panel.log']:
         if not os.path.exists(lf): open(lf,'a').close()
         try: os.chmod(lf,0o666)
@@ -1154,7 +1081,7 @@ if __name__=='__main__':
     apply_iran_block()
     sync_users_from_db()
     logger.info(f"Panel starting on port {get_panel_port()}")
-    app.run(host='0.0.0.0', port=get_panel_port(), debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=get_panel_port(), debug=False, threaded=False)
 APPEOF
 
 echo "✓ Panel application created"
@@ -1165,83 +1092,29 @@ echo "✓ Panel application created"
 echo "[8/16] Creating Iran block script..."
 cat << 'EOF' > /usr/local/bin/iran-block.sh
 #!/bin/bash
-set -euo pipefail
 IPSET_NAME="iran_ips"
-CACHE_DIR="/var/cache/ssh-panel"
-ZONE_FILE="$CACHE_DIR/ir.zone"
-mkdir -p "$CACHE_DIR"
-exec 9>/run/ssh-panel-iran.lock
-flock -w 30 9
-ACTION="${1:-apply}"
-if [ "$ACTION" = apply ]; then
-    ACTION=$(python3 - <<'PY'
-import sqlite3
-with sqlite3.connect('file:/root/ssh-panel/panel.db?mode=ro', uri=True) as connection:
-    row = connection.execute("SELECT value FROM settings WHERE key='block_iran_client'").fetchone()
-print('enable' if row and row[0] == '1' else 'disable')
-PY
-)
-fi
-changed=0
-case "$ACTION" in
+case "$1" in
     enable)
-        ipset create "$IPSET_NAME" hash:net maxelem 200000 -exist
-        ready=0
-        if [ -s "$ZONE_FILE" ] && [ "$(($(date +%s) - $(stat -c %Y "$ZONE_FILE")))" -lt 86400 ]; then
-            if ipset list "$IPSET_NAME" -t | awk '/Number of entries:/{if ($4 > 0) good=1} END{exit !good}'; then
-                ready=1
-            fi
+        ipset create $IPSET_NAME hash:net maxelem 200000 2>/dev/null
+        curl -s https://www.ipdeny.com/ipblocks/data/countries/ir.zone -o /tmp/ir.zone
+        if [ -s /tmp/ir.zone ]; then
+            ipset flush $IPSET_NAME 2>/dev/null
+            while read -r line; do
+                [ -n "$line" ] && ipset add $IPSET_NAME "$line" 2>/dev/null
+            done < /tmp/ir.zone
         fi
-        if [ "$ready" -eq 0 ]; then
-            if curl -fsSL --connect-timeout 5 --max-time 15 https://www.ipdeny.com/ipblocks/data/countries/ir.zone -o "$ZONE_FILE.new"; then
-                python3 - "$ZONE_FILE.new" <<'PY'
-import ipaddress, sys
-with open(sys.argv[1]) as stream:
-    values = [line.strip() for line in stream if line.strip()]
-if not values:
-    raise SystemExit('Empty Iran IP list')
-for value in values:
-    if ipaddress.ip_network(value, strict=False).version != 4:
-        raise SystemExit('Invalid IPv4 block')
-PY
-                mv "$ZONE_FILE.new" "$ZONE_FILE"
-            else
-                rm -f "$ZONE_FILE.new"
-                [ -s "$ZONE_FILE" ] || exit 1
-            fi
-            # One restore transaction, instead of thousands of ipset processes.
-            python3 - "$ZONE_FILE" <<'PY' | ipset restore -exist
-import ipaddress, sys
-with open(sys.argv[1]) as stream:
-    networks = [str(ipaddress.ip_network(line.strip(), strict=False)) for line in stream if line.strip()]
-print('create iran_ips_next hash:net maxelem 200000')
-print('flush iran_ips_next')
-for network in networks:
-    print('add iran_ips_next ' + network)
-print('swap iran_ips_next iran_ips')
-print('flush iran_ips_next')
-PY
-        fi
-        if ! iptables -w 2 -C OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
-            iptables -w 2 -I OUTPUT 1 -m state --state ESTABLISHED,RELATED -j ACCEPT
-            changed=1
-        fi
-        if ! iptables -w 2 -C OUTPUT -m set --match-set "$IPSET_NAME" dst -j DROP 2>/dev/null; then
-            iptables -w 2 -A OUTPUT -m set --match-set "$IPSET_NAME" dst -j DROP
-            changed=1
-        fi
+        iptables -C OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+            iptables -I OUTPUT 1 -m state --state ESTABLISHED,RELATED -j ACCEPT
+        iptables -C OUTPUT -m set --match-set $IPSET_NAME dst -j DROP 2>/dev/null || \
+            iptables -A OUTPUT -m set --match-set $IPSET_NAME dst -j DROP
+        netfilter-persistent save 2>/dev/null
         ;;
     disable)
-        if iptables -w 2 -C OUTPUT -m set --match-set "$IPSET_NAME" dst -j DROP 2>/dev/null; then
-            iptables -w 2 -D OUTPUT -m set --match-set "$IPSET_NAME" dst -j DROP
-            changed=1
-        fi
+        iptables -D OUTPUT -m set --match-set $IPSET_NAME dst -j DROP 2>/dev/null
+        netfilter-persistent save 2>/dev/null
         ;;
-    *) echo "Usage: $0 enable|disable|apply"; exit 1 ;;
+    *) echo "Usage: $0 enable|disable"; exit 1 ;;
 esac
-if [ "$changed" -eq 1 ]; then
-    netfilter-persistent save 2>/dev/null || true
-fi
 EOF
 chmod +x /usr/local/bin/iran-block.sh
 
@@ -1251,7 +1124,7 @@ Description=Apply Iran outbound IP blocking
 After=network.target
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/iran-block.sh apply
+ExecStart=/usr/local/bin/iran-block.sh enable
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
@@ -1264,357 +1137,320 @@ echo "[9/16] Creating traffic worker v3.7..."
 cat << 'WORKEREOF' > /root/ssh-panel/traffic_worker.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""v3.7 repair: one bounded collector for traffic, online and IP limits."""
-import fcntl
-import json
-import logging
-import os
-import re
-import signal
-import sqlite3
-import subprocess
-import sys
-import time
-from collections import defaultdict
-from contextlib import closing
+import sys, time, sqlite3, subprocess, re, json, os
 from datetime import datetime
-from telemetry import BoundedLogReader, ONLINE_TTL, atomic_json, canonical_ip, endpoint, log_activity
 
 sys.path.insert(0, '/root/ssh-panel/grpc_proto')
 try:
     import grpc
     import stats_pb2
     import stats_pb2_grpc
-except ImportError:
-    grpc = None
+    HAS_GRPC = True
+except Exception as e:
+    print(f"Failed to load gRPC: {e}")
+    HAS_GRPC = False
 
-DB_PATH = '/root/ssh-panel/panel.db'
-ONLINE_FILE = '/tmp/online_users.json'
-SSH_SESSIONS_FILE = '/tmp/ssh_sessions.json'
-POLL_INTERVAL = 5
-logger = logging.getLogger('OP.worker')
-SOCKET_RE = re.compile(r'^(?:ESTAB\s+)?\d+\s+\d+\s+(\S+)\s+(\S+)')
-PID_RE = re.compile(r'pid=(\d+)')
-INODE_RE = re.compile(r'\bino:(\d+)')
-TITLE_RE = re.compile(r'\bsshd(?:-session|-auth)?:\s+([^\s@]+)(?:@(\S+)|\s+\[priv\])')
+DB_PATH = "/root/ssh-panel/panel.db"
+ONLINE_FILE = "/tmp/online_users.json"
+WORKER_LOCK = "/tmp/traffic_worker.lock"
+SSH_SESSIONS_FILE = "/tmp/ssh_sessions.json"
+XRAY_LOG_PATH = "/tmp/xray_access.log"
+XRAY_LOG_POS = "/tmp/xray_log_pos.txt"
 
+POLL_INTERVAL = 3
+ONLINE_TTL = 30
 
-def run_output(command):
-    return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL, timeout=3)
+SSH_SESSIONS = {}
+ONLINE_USERS = {}
+XRAY_USER_IPS = {} 
 
+def load_state():
+    global SSH_SESSIONS, ONLINE_USERS
+    try:
+        if os.path.exists(SSH_SESSIONS_FILE):
+            with open(SSH_SESSIONS_FILE) as f:
+                SSH_SESSIONS = json.load(f)
+    except Exception:
+        SSH_SESSIONS = {}
+    try:
+        if os.path.exists(ONLINE_FILE):
+            with open(ONLINE_FILE) as f:
+                ONLINE_USERS = json.load(f).get('users', {})
+    except Exception:
+        ONLINE_USERS = {}
 
-class SSHCollector:
-    def __init__(self, state_path=SSH_SESSIONS_FILE):
-        self.state_path, self.sessions = state_path, {}
-        self.initialized = False
-        try:
-            with open('/proc/sys/kernel/random/boot_id') as stream:
-                self.boot_id = stream.read().strip()
-        except OSError:
-            self.boot_id = ''
-        try:
-            with open(state_path) as stream:
-                state = json.load(stream)
-            if state.get('version') == 2 and state.get('boot_id') == self.boot_id:
-                self.sessions = state.get('sessions', {})
-        except (OSError, ValueError, AttributeError):
-            pass
+def save_state():
+    try:
+        now = time.time()
+        with open(ONLINE_FILE + ".tmp", 'w') as f:
+            json.dump({'last_update': now, 'users': ONLINE_USERS}, f)
+        os.replace(ONLINE_FILE + ".tmp", ONLINE_FILE)
+        with open(SSH_SESSIONS_FILE + ".tmp", 'w') as f:
+            json.dump(SSH_SESSIONS, f)
+        os.replace(SSH_SESSIONS_FILE + ".tmp", SSH_SESSIONS_FILE)
+    except Exception as e:
+        print(f"save_state error: {e}")
 
-    @staticmethod
-    def process_users(output, known):
-        processes, authenticated = {}, {}
-        for line in output.splitlines():
-            fields = line.strip().split(None, 2)
-            if len(fields) != 3:
-                continue
-            try:
-                pid, parent = int(fields[0]), int(fields[1])
-            except ValueError:
-                continue
-            title = TITLE_RE.search(fields[2])
-            username = title.group(1) if title else None
-            processes[pid] = (parent, username)
-            if title and title.group(2) and username in known and '[preauth]' not in fields[2]:
-                authenticated[pid] = username
-        # Privileged parents also own sockets. Resolve them via an authenticated
-        # child rather than treating a pre-authentication title as online.
-        for pid, username in list(authenticated.items()):
-            for _ in range(8):
-                parent = processes.get(pid, (0, None))[0]
-                record = processes.get(parent)
-                if not record or record[1] != username:
-                    break
-                authenticated[parent] = username
-                pid = parent
-        return authenticated
+def prime_xray_stats():
+    if not HAS_GRPC: return
+    try:
+        channel = grpc.insecure_channel('127.0.0.1:10085')
+        stub = stats_pb2_grpc.StatsServiceStub(channel)
+        stub.QueryStats(stats_pb2.QueryStatsRequest(pattern="user>>>", reset=False), timeout=5)
+        channel.close()
+    except: pass
 
-    def collect(self, known, now):
-        known = {username for username in known if username != 'root'}
-        traffic = defaultdict(float)
-        try:
-            output = run_output(['ss', '-Htnpie', 'state', 'established', '( sport = :22 )'])
-            records, current = [], {}
-            for line in output.splitlines():
-                match = SOCKET_RE.match(line)
-                if match:
-                    records.append([match, line])
-                elif records:
-                    records[-1][1] += ' ' + line
-            users = self.process_users(run_output(['ps', '-eo', 'pid=,ppid=,args=']), known) if records else {}
-            for match, record in records:
-                local, peer = endpoint(match.group(1)), endpoint(match.group(2))
-                if not local or not peer or local[1] != 22:
-                    continue
-                username = next((users[int(pid)] for pid in PID_RE.findall(record) if int(pid) in users), None)
-                if not username:
-                    continue
-                inode = INODE_RE.search(record)
-                key = '|'.join((username, match.group(1), match.group(2), inode.group(1) if inode else ''))
-                tx = re.search(r'\bbytes_acked:(\d+)', record)
-                rx = re.search(r'\bbytes_received:(\d+)', record)
-                tx, rx = int(tx.group(1)) if tx else 0, int(rx.group(1)) if rx else 0
-                current[key] = {'username': username, 'ip': peer[0], 'tx': tx, 'rx': rx, 'ts': now}
-                previous = self.sessions.get(key)
-                if previous:
-                    delta = max(0, tx - int(previous.get('tx', 0))) + max(0, rx - int(previous.get('rx', 0)))
-                else:
-                    # Migration must not bill existing sessions a second time.
-                    delta = tx + rx if self.initialized else 0
-                traffic[username] += delta / (1024.0 * 1024.0)
-            self.sessions, self.initialized = current, True
-            atomic_json(self.state_path, {'version': 2, 'boot_id': self.boot_id, 'sessions': current})
-        except (OSError, subprocess.SubprocessError) as error:
-            logger.warning('SSH sampling failed: %s', error)
-        ips, counts = defaultdict(set), defaultdict(int)
-        for item in self.sessions.values():
-            if item['username'] in known and now - item['ts'] <= 15:
-                ips[item['username']].add(item['ip'])
-                counts[item['username']] += 1
-        return dict(traffic), dict(ips), dict(counts)
+def get_xray_traffic():
+    if not HAS_GRPC: return {}
+    traffic = {}
+    try:
+        channel = grpc.insecure_channel('127.0.0.1:10085')
+        stub = stats_pb2_grpc.StatsServiceStub(channel)
+        resp = stub.QueryStats(stats_pb2.QueryStatsRequest(pattern="user>>>", reset=False), timeout=5)
 
+        for stat in resp.stat:
+            parts = stat.name.split('>>>')
+            if len(parts) >= 4 and parts[0] == 'user' and parts[2] == 'traffic':
+                username = parts[1]
+                mb = stat.value / (1024.0 * 1024.0)
+                if mb > 0.0001:
+                    traffic[username] = traffic.get(username, 0.0) + mb
+        channel.close()
+    except: pass
+    return traffic
 
-class XrayCollector:
-    def __init__(self):
-        self.channel, self.stub = None, None
-        self.batch_supported, self.legacy_supported = True, True
-        if grpc:
-            self.channel = grpc.insecure_channel('127.0.0.1:10085')
-            self.stub = stats_pb2_grpc.StatsServiceStub(self.channel)
+def _get_log_pos():
+    try:
+        with open(XRAY_LOG_POS) as f: return int(f.read().strip())
+    except: return 0
 
-    def close(self):
-        if self.channel:
-            self.channel.close()
+def _save_log_pos(pos):
+    try:
+        with open(XRAY_LOG_POS, 'w') as f: f.write(str(pos))
+    except: pass
 
-    def traffic(self, aliases):
-        result = defaultdict(float)
-        if not self.stub:
-            return {}
-        try:
-            response = self.stub.QueryStats(stats_pb2.QueryStatsRequest(pattern='user>>>', reset=True), timeout=2)
-            for item in response.stat:
-                fields = item.name.split('>>>')
-                if len(fields) == 4 and fields[0] == 'user' and fields[2] == 'traffic' and fields[1] in aliases and item.value > 0:
-                    result[aliases[fields[1]]] += item.value / (1024.0 * 1024.0)
-        except grpc.RpcError:
-            pass
-        # No startup prime/reset: a worker restart must not discard traffic.
-        return dict(result)
+def parse_xray_log_online():
+    seen = set()
+    try:
+        if not os.path.exists(XRAY_LOG_PATH): return seen
+        size = os.path.getsize(XRAY_LOG_PATH)
+        pos = _get_log_pos()
+        if pos > size: pos = 0
+        if pos >= size: return seen
 
-    @staticmethod
-    def email(value):
-        return value[7:-9] if value.startswith('user>>>') and value.endswith('>>>online') else value
+        with open(XRAY_LOG_PATH, 'r', errors='ignore') as f:
+            f.seek(pos)
+            lines = f.readlines()
+            new_pos = f.tell()
 
-    def online(self, aliases):
-        if not self.stub:
-            return {}, set()
-        if self.batch_supported:
-            try:
-                response = self.stub.GetUsersStats(stats_pb2.GetUsersStatsRequest(include_traffic=False, reset=False), timeout=2)
-                addresses = defaultdict(set)
-                for user in response.users:
-                    if user.email in aliases:
-                        for item in user.ips:
-                            ip = canonical_ip(item.ip)
-                            if ip:
-                                addresses[aliases[user.email]].add(ip)
-                return dict(addresses), set(aliases.values())
-            except grpc.RpcError as error:
-                if error.code() == grpc.StatusCode.UNIMPLEMENTED:
-                    self.batch_supported = False
-                else:
-                    return {}, set()
-        if self.legacy_supported:
-            try:
-                response = self.stub.GetAllOnlineUsers(stats_pb2.GetAllOnlineUsersRequest(), timeout=1)
-                emails = {self.email(value) for value in response.users} & set(aliases)
-                addresses, queried_emails = defaultdict(set), set(aliases) - emails
-                deadline = time.monotonic() + 2
-                for email in sorted(emails):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    try:
-                        item = self.stub.GetStatsOnlineIpList(stats_pb2.GetStatsRequest(name='user>>>' + email + '>>>online'), timeout=min(0.5, remaining))
-                        queried_emails.add(email)
-                        for value in item.ips:
-                            ip = canonical_ip(value)
-                            if ip:
-                                addresses[aliases[email]].add(ip)
-                    except grpc.RpcError:
-                        continue
-                authoritative = {username for username in aliases.values()
-                                 if all(email in queried_emails for email, owner in aliases.items() if owner == username)}
-                return dict(addresses), authoritative
-            except grpc.RpcError as error:
-                if error.code() == grpc.StatusCode.UNIMPLEMENTED:
-                    self.legacy_supported = False
-        return {}, set()
+        for line in lines:
+            m = re.search(r'email:\s*(\S+)', line)
+            if m:
+                u = m.group(1).strip()
+                seen.add(u)
+                m_ip = re.search(r'from\s*([0-9a-fA-F\.:]+):\d+', line)
+                if not m_ip:
+                    m_ip = re.search(r'([0-9a-fA-F\.:]+):\d+ accepted', line)
+                if m_ip:
+                    ip = m_ip.group(1)
+                    if u not in XRAY_USER_IPS: XRAY_USER_IPS[u] = {}
+                    XRAY_USER_IPS[u][ip] = time.time()
 
+        _save_log_pos(new_pos)
+    except: pass
+    return seen
 
-def read_accounts():
-    with closing(sqlite3.connect(DB_PATH, timeout=5)) as connection:
-        connection.row_factory = sqlite3.Row
-        users = {row['username']: dict(row) for row in connection.execute('SELECT username,max_connections FROM users WHERE status=1')}
-        aliases = dict((username, username) for username in users)
-        for email, username in connection.execute('''SELECT cl.email, cl.username FROM xray_clients cl
-                JOIN xray_inbounds ib ON ib.id=cl.inbound_id JOIN users u ON u.username=cl.username
-                WHERE cl.enable=1 AND ib.status=1 AND u.status=1'''):
-            if email:
-                aliases[email] = username
-        ports = [22] + [row[0] for row in connection.execute('SELECT port FROM xray_inbounds WHERE status=1')]
-    return users, aliases, sorted({int(port) for port in ports if 0 < int(port) < 65536})
+def get_ssh_traffic():
+    global SSH_SESSIONS
+    traffic = {}
+    now = time.time()
+    try:
+        out = subprocess.check_output("ss -tnpi state established '( sport = :22 )' 2>/dev/null", shell=True, text=True, timeout=5)
+    except:
+        return traffic
 
+    lines = [l for l in out.split('\n') if l.strip()]
+    current_sessions = {}
 
-def update_usage(traffic):
-    deactivated = []
-    with closing(sqlite3.connect(DB_PATH, timeout=5)) as connection:
-        with connection:
-            connection.executemany('UPDATE users SET used_traffic=used_traffic+? WHERE username=?',
-                                   [(mb, username) for username, mb in traffic.items() if mb > 0])
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            deactivated = [row[0] for row in connection.execute('''SELECT username FROM users WHERE status=1
-                AND ((total_traffic>0 AND used_traffic>=total_traffic) OR datetime(expire_date)<=?)''', (now,))]
-            connection.executemany('UPDATE users SET status=0 WHERE username=?', [(username,) for username in deactivated])
-    for username in deactivated:
-        if username == 'root':
+    for i, line in enumerate(lines):
+        if 'pid=' not in line:
             continue
-        for command in (['usermod', '-L', username], ['pkill', '-u', username]):
-            try:
-                subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
-            except (OSError, subprocess.SubprocessError):
-                logger.warning('Could not terminate expired SSH account %s', username)
-    return deactivated
 
+        pid_m = re.search(r'pid=(\d+)', line)
+        if not pid_m: continue
+        pid = pid_m.group(1)
 
-class Worker:
-    def __init__(self):
-        self.ssh, self.xray = SSHCollector(), XrayCollector()
-        self.log = BoundedLogReader('/tmp/xray_access.log', '/tmp/xray_log_cursor_v2.json')
-        self.activity, self.log_ips, self.native_cache = {}, {}, {}
-        self.native_seen, self.first_seen = set(), {}
-        self.pending, self.sync_pending = defaultdict(float), False
+        info_line = lines[i+1] if (i+1 < len(lines) and 'pid=' not in lines[i+1]) else ""
 
-    def tick(self, now=None):
-        now = time.time() if now is None else now
-        users, aliases, ports = read_accounts()
-        traffic = self.xray.traffic(aliases)
-        for username, mb in traffic.items():
-            self.pending[username] += mb
-            self.activity[username] = now
-        for username, ips in log_activity(self.log.read(), aliases, now).items():
-            self.log_ips.setdefault(username, {}).update(ips)
-        ssh_traffic, ssh_ips, ssh_sessions = self.ssh.collect(users, now)
-        for username, mb in ssh_traffic.items():
-            self.pending[username] += mb
-        native_ips, authoritative = self.xray.online(aliases)
-        for username in authoritative:
-            self.native_cache[username] = (set(native_ips.get(username, ())), now)
-        for username, ips in native_ips.items():
-            if ips:
-                self.native_seen.add(username)
+        bytes_acked = 0
+        bytes_received = 0
+        m = re.search(r'bytes_acked:(\d+)', info_line)
+        if m: bytes_acked = int(m.group(1))
+        m = re.search(r'bytes_received:(\d+)', info_line)
+        if m: bytes_received = int(m.group(1))
+
+        username = None
         try:
-            disabled = update_usage(self.pending)
-            self.pending.clear()
-            self.sync_pending = self.sync_pending or bool(disabled)
-            for username in disabled:
-                users.pop(username, None)
-        except sqlite3.Error as error:
-            logger.warning('Usage transaction failed; retaining deltas for retry: %s', error)
-        online, live_first_seen = {}, {}
-        for username, account in users.items():
-            recent_ips = {ip: ts for ip, ts in self.log_ips.get(username, {}).items() if now - ts <= ONLINE_TTL}
-            if recent_ips:
-                self.log_ips[username] = recent_ips
-            else:
-                self.log_ips.pop(username, None)
-            cached_ips, cached_at = self.native_cache.get(username, (set(), 0))
-            native_known = username in authoritative or now - cached_at <= 15
-            xray_ips = set(native_ips.get(username, cached_ips if native_known else ()))
-            # Older cores and local proxies need a short activity window.
-            fallback = not native_known or username not in self.native_seen
-            active = now - self.activity.get(username, 0) <= ONLINE_TTL
-            if fallback:
-                xray_ips.update(recent_ips)
-            is_xray = bool(xray_ips) or (fallback and active)
-            ssh_addresses = set(ssh_ips.get(username, ()))
-            combined, first = ssh_addresses | xray_ips, {}
-            for ip in combined:
-                key = (username, ip)
-                first[ip] = self.first_seen.get(key, now)
-                live_first_seen[key] = first[ip]
-            if ssh_addresses or is_xray:
-                online[username] = {
-                    'ssh': len(ssh_addresses), 'ssh_sessions': ssh_sessions.get(username, 0),
-                    'xray': is_xray, 'xray_ips': len(xray_ips),
-                    'ssh_ips': sorted(ssh_addresses), 'xray_addresses': sorted(xray_ips),
-                    'ips': sorted(combined), 'ip_first_seen': first,
-                    'online_count': max(1, len(combined)), 'ts': now,
-                    'max_connections': account['max_connections'],
-                }
-        self.first_seen = live_first_seen
-        for mapping in (self.activity, self.native_cache, self.log_ips):
-            for username in list(mapping):
-                if username not in users:
-                    del mapping[username]
-        self.native_seen.intersection_update(users)
-        atomic_json(ONLINE_FILE, {'version': 2, 'last_update': now, 'users': online, 'ports': ports})
-        if self.sync_pending:
-            try:
-                subprocess.run([sys.executable, '/root/ssh-panel/sync_xray.py'], check=True, timeout=30)
-                self.sync_pending = False
-            except (OSError, subprocess.SubprocessError) as error:
-                logger.warning('Xray synchronization will be retried: %s', error)
+            cmd = subprocess.check_output(f"ps -p {pid} -o command= 2>/dev/null", shell=True, text=True, timeout=2).strip()
+            if cmd:
+                m = re.search(r'sshd:\s+([a-zA-Z0-9_\-]+)', cmd)
+                if m:
+                    u = m.group(1)
+                    if u not in ('root', 'sshd', 'nobody', 'priv', 'daemon'):
+                        username = u
+        except: pass
 
+        if username:
+            parts = line.split()
+            peer = parts[4] if len(parts) > 4 else "0.0.0.0:0"
+
+            key = f"{username}@{peer}"
+            current_sessions[key] = {
+                'bytes_acked': bytes_acked,
+                'bytes_received': bytes_received,
+                'username': username,
+                'last_seen': now
+            }
+
+            prev = SSH_SESSIONS.get(key)
+            if prev and prev.get('username') == username:
+                d_tx = max(0, bytes_acked - int(prev.get('bytes_acked', 0)))
+                d_rx = max(0, bytes_received - int(prev.get('bytes_received', 0)))
+            else:
+                d_tx = bytes_acked
+                d_rx = bytes_received
+
+            total_mb = (d_tx + d_rx) / (1024.0 * 1024.0)
+            if total_mb > 0.0005:
+                traffic[username] = traffic.get(username, 0.0) + total_mb
+
+    for k, v in SSH_SESSIONS.items():
+        if k not in current_sessions and (now - v.get('last_seen', 0)) < 10:
+            current_sessions[k] = v
+    SSH_SESSIONS = current_sessions
+
+    return traffic
+
+def cleanup_online():
+    now = time.time()
+    for u in list(XRAY_USER_IPS.keys()):
+        for ip in list(XRAY_USER_IPS[u].keys()):
+            if now - XRAY_USER_IPS[u][ip] > ONLINE_TTL:
+                del XRAY_USER_IPS[u][ip]
+        if not XRAY_USER_IPS[u]:
+            del XRAY_USER_IPS[u]
+            
+    for u in list(ONLINE_USERS.keys()):
+        if now - ONLINE_USERS[u].get('ts', 0) > ONLINE_TTL:
+            del ONLINE_USERS[u]
+
+def update_usage(user_traffic):
+    if not user_traffic: return False
+    deactivated_any = False
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=15)
+        c = conn.cursor()
+        for username, mb in user_traffic.items():
+            c.execute("UPDATE users SET used_traffic = used_traffic + ? WHERE username = ?", (mb, username))
+            c.execute("SELECT total_traffic, used_traffic, expire_date, status FROM users WHERE username = ?", (username,))
+            row = c.fetchone()
+            if not row: continue
+            total, used, expire_date, status = row
+            deactivate = False
+            if total and float(total) > 0 and float(used) >= float(total):
+                deactivate = True
+            try:
+                if datetime.now() > datetime.strptime(expire_date, '%Y-%m-%d %H:%M'):
+                    deactivate = True
+            except: pass
+            
+            if deactivate and int(status) == 1:
+                c.execute("UPDATE users SET status = 0 WHERE username = ?", (username,))
+                subprocess.run(["pkill", "-u", username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                deactivated_any = True
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"update_usage error: {e}")
+    return deactivated_any
 
 def main():
-    logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(levelname)s %(message)s')
-    lock = open('/root/ssh-panel/traffic_worker.lock', 'a')
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        fd = os.open(WORKER_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        print("[!] Worker already running")
         return
-    stopping = False
-    def stop(signum, frame):
-        nonlocal stopping
-        stopping = True
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    worker = Worker()
-    try:
-        while not stopping:
-            started = time.monotonic()
-            try:
-                worker.tick()
-            except Exception:
-                logger.exception('Worker sample failed')
-            remaining = max(1, POLL_INTERVAL - (time.monotonic() - started))
-            until = time.monotonic() + remaining
-            while not stopping and time.monotonic() < until:
-                time.sleep(min(0.25, max(0, until - time.monotonic())))
-    finally:
-        worker.xray.close()
-        lock.close()
 
+    print("[*] OutlineParsian Worker v3.7 started")
+    load_state()
+    prime_xray_stats()
+    time.sleep(1)
+
+    last_db_sync = 0
+    while True:
+        try:
+            now = time.time()
+            traffic = {}
+            
+            xray_traffic = get_xray_traffic()
+            for u, t in xray_traffic.items():
+                traffic[u] = traffic.get(u, 0.0) + t
+            
+            xray_online_from_log = parse_xray_log_online()
+            
+            ssh_traffic = get_ssh_traffic()
+            for u, t in ssh_traffic.items():
+                traffic[u] = traffic.get(u, 0.0) + t
+            
+            active_xray = set(xray_traffic.keys()) | xray_online_from_log
+            active_ssh = {}
+            for s in SSH_SESSIONS.values():
+                u = s['username']
+                active_ssh[u] = active_ssh.get(u, 0) + 1
+            
+            for u in list(ONLINE_USERS.keys()):
+                is_xray = u in active_xray
+                ssh_count = active_ssh.get(u, 0)
+                xray_ip_cnt = len(XRAY_USER_IPS.get(u, {}))
+                
+                ONLINE_USERS[u]['xray'] = is_xray
+                ONLINE_USERS[u]['ssh'] = ssh_count
+                ONLINE_USERS[u]['xray_ips'] = xray_ip_cnt if is_xray else 0
+                if is_xray or ssh_count > 0:
+                    ONLINE_USERS[u]['ts'] = now
+            
+            for u in active_xray:
+                if u not in ONLINE_USERS:
+                    ONLINE_USERS[u] = {'ssh': 0, 'xray': True, 'ts': now, 'xray_ips': len(XRAY_USER_IPS.get(u, {}))}
+            
+            for u, cnt in active_ssh.items():
+                if u not in ONLINE_USERS:
+                    ONLINE_USERS[u] = {'ssh': cnt, 'xray': False, 'ts': now, 'xray_ips': 0}
+                else:
+                    ONLINE_USERS[u]['ssh'] = cnt
+                    ONLINE_USERS[u]['ts'] = now
+            
+            if now - last_db_sync >= 3 and update_usage(traffic):
+                last_db_sync = now
+                print("[*] User deactivated, syncing Xray to block them...")
+                try:
+        subprocess.run(
+            ["python3", "/root/ssh-panel/sync_xray.py"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15
+        )
+    except Exception as e:
+        logger.error(f"Xray sync failed: {e}")
+            
+            cleanup_online()
+            save_state()
+            
+        except Exception as e:
+            print(f"Worker loop error: {e}")
+        time.sleep(POLL_INTERVAL)
 
 if __name__ == '__main__':
     main()
@@ -1622,170 +1458,172 @@ WORKEREOF
 chmod +x /root/ssh-panel/traffic_worker.py
 echo "✓ Worker created"
 
+# CPU protection: rotate Xray logs to prevent unlimited parsing growth
+cat << 'LOGROT' > /etc/logrotate.d/outlineparsian-xray
+/tmp/xray_access.log /tmp/xray_error.log {
+    daily
+    rotate 7
+    size 50M
+    copytruncate
+    compress
+    missingok
+    notifempty
+}
+LOGROT
+
+
 # ============================================
 # STEP 10: Smart IP Manager v3.7
 # ============================================
 echo "[10/16] Creating Smart IP Manager (Multi-device limiter)..."
 cat << 'EOF' > /root/ssh-panel/ip_manager.py
 #!/usr/bin/env python3
-"""IP limiter consuming the worker snapshot, never rescanning SSH or logs."""
-import fcntl
-import ipaddress
-import json
-import logging
-import os
-import signal
-import subprocess
-import time
-from telemetry import SnapshotReader, atomic_json, canonical_ip
+import sqlite3, subprocess, re, time, json, os
 
-ONLINE_FILE = '/tmp/online_users.json'
-STATE_FILE = '/tmp/ip_manager_state.json'
-CHAIN = 'OP_PANEL_LIMIT'
-SETS = {4: 'op_limit_v4', 6: 'op_limit_v6'}
-logger = logging.getLogger('OP.limiter')
+DB_PATH = '/root/ssh-panel/panel.db'
+XRAY_LOG_PATH = "/tmp/xray_access.log"
+XRAY_LOG_POS = "/tmp/xray_log_pos_ip.txt"
+STATE_FILE = "/tmp/ip_manager_state.json"
 
+POLL_INTERVAL = 2
+IP_TIMEOUT = 60
 
-def command(args, **kwargs):
-    return subprocess.run(args, text=True, stdout=subprocess.DEVNULL,
-                          stderr=subprocess.PIPE, timeout=5, **kwargs)
+user_ips = {}
+blocked_ips = set()
 
-
-def desired_blocks(snapshot):
-    blocked = set()
-    for info in snapshot.get('users', {}).values():
-        try:
-            limit = int(info.get('max_connections', 0))
-            if limit <= 0:
-                continue
-            addresses = {canonical_ip(value) for value in info.get('ips', ())}
-            addresses.discard(None)
-            first = info.get('ip_first_seen', {})
-            ordered = sorted(addresses, key=lambda ip: (float(first.get(ip, 0)), ip))
-            blocked.update(ordered[limit:])
-        except (ValueError, TypeError, AttributeError):
-            continue
-    return blocked
-
-
-class Firewall:
-    def __init__(self):
-        self.initialized = False
-        self.ports, self.blocked, self.refreshed = None, None, 0
-
-    def initialize(self):
-        for family, name in SETS.items():
-            for set_name in (name, name + '_next'):
-                result = command(['ipset', 'create', set_name, 'hash:ip', 'family',
-                                  'inet' if family == 4 else 'inet6', 'timeout', '60', 'maxelem', '200000', '-exist'])
-                if result.returncode:
-                    raise RuntimeError(result.stderr.strip())
-            tool = 'iptables' if family == 4 else 'ip6tables'
-            if command([tool, '-w', '2', '-S', CHAIN]).returncode:
-                result = command([tool, '-w', '2', '-N', CHAIN])
-                if result.returncode:
-                    raise RuntimeError(result.stderr.strip())
-            if command([tool, '-w', '2', '-C', 'INPUT', '-j', CHAIN]).returncode:
-                result = command([tool, '-w', '2', '-I', 'INPUT', '1', '-j', CHAIN])
-                if result.returncode:
-                    raise RuntimeError(result.stderr.strip())
-        self.initialized = True
-
-    def set_ports(self, ports):
-        ports = tuple(sorted({int(port) for port in ports if 0 < int(port) < 65536}))
-        if ports == self.ports:
-            return
-        for family, name in SETS.items():
-            # Rewrite only our own chain. Existing INPUT rules stay in place.
-            rules = ['*filter', ':' + CHAIN + ' - [0:0]', '-F ' + CHAIN]
-            for offset in range(0, len(ports), 15):
-                chunk = ','.join(map(str, ports[offset:offset + 15]))
-                rules.append('-A ' + CHAIN + ' -p tcp -m multiport --dports ' + chunk +
-                             ' -m set --match-set ' + name + ' src -j DROP')
-            rules.append('COMMIT')
-            result = command(['iptables-restore' if family == 4 else 'ip6tables-restore', '-w', '2', '--noflush'],
-                             input='\n'.join(rules) + '\n')
-            if result.returncode:
-                raise RuntimeError(result.stderr.strip())
-        self.ports = ports
-
-    def apply(self, blocked, ports, now=None):
-        now = time.time() if now is None else now
-        if not self.initialized:
-            self.initialize()
-        self.set_ports(ports)
-        # A stable idle snapshot runs no firewall commands. Refresh active
-        # sets in one batch; timeout also releases rules if the limiter dies.
-        if blocked == self.blocked and (not blocked or now - self.refreshed < 20):
-            return False
-        lines = []
-        for family, name in SETS.items():
-            stage = name + '_next'
-            lines.append('flush ' + stage)
-            for address in sorted(blocked):
-                if ipaddress.ip_address(address).version == family:
-                    lines.append('add ' + stage + ' ' + address + ' timeout 60')
-            lines.extend(('swap ' + stage + ' ' + name, 'flush ' + stage))
-        result = command(['ipset', 'restore', '-exist'], input='\n'.join(lines) + '\n')
-        if result.returncode:
-            raise RuntimeError(result.stderr.strip())
-        self.blocked, self.refreshed = set(blocked), now
-        return True
-
-    def clear(self):
-        if self.initialized:
-            command(['ipset', 'restore', '-exist'], input='\n'.join('flush ' + name for name in SETS.values()) + '\n')
-
-
-def clean_legacy_rules(state_path=STATE_FILE):
+def load_state():
+    global blocked_ips
     try:
-        with open(state_path) as stream:
-            state = json.load(stream)
-        if isinstance(state, dict) and state.get('version') == 2:
-            return
-        values = state if isinstance(state, list) else state.get('blocked_ips', [])
-        for value in values:
-            address = canonical_ip(value)
-            if address:
-                command(['iptables' if ipaddress.ip_address(address).version == 4 else 'ip6tables',
-                         '-w', '2', '-D', 'INPUT', '-s', address, '-j', 'DROP'])
-        atomic_json(state_path, {'version': 2, 'blocked_ips': []})
-    except (OSError, ValueError, AttributeError):
-        pass
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE) as f:
+                blocked_ips = set(json.load(f).get('blocked_ips', []))
+    except: pass
 
+def save_state():
+    try:
+        with open(STATE_FILE + ".tmp", 'w') as f:
+            json.dump(list(blocked_ips), f)
+        os.replace(STATE_FILE + ".tmp", STATE_FILE)
+    except: pass
+
+def get_log_pos():
+    try:
+        with open(XRAY_LOG_POS) as f: return int(f.read().strip())
+    except: return 0
+
+def save_log_pos(pos):
+    try:
+        with open(XRAY_LOG_POS, 'w') as f: f.write(str(pos))
+    except: pass
+
+def parse_xray_log():
+    try:
+        if not os.path.exists(XRAY_LOG_PATH): return
+        size = os.path.getsize(XRAY_LOG_PATH)
+        pos = get_log_pos()
+        if pos > size: pos = 0
+        if pos >= size: return
+
+        with open(XRAY_LOG_PATH, 'r', errors='ignore') as f:
+            f.seek(pos)
+            lines = f.readlines()
+            new_pos = f.tell()
+
+        for line in lines:
+            m = re.search(r'from\s*([0-9a-fA-F\.:]+):\d+.*email:\s*(\S+)', line)
+            if not m:
+                m = re.search(r'([0-9a-fA-F\.:]+):\d+.*\[\w+ >> (\S+)\]', line)
+            if m:
+                ip = m.group(1)
+                u = m.group(2).strip()
+                if u not in user_ips: user_ips[u] = {}
+                user_ips[u][ip] = time.time()
+
+        save_log_pos(new_pos)
+    except Exception as e:
+        print(f"Xray log parse error: {e}")
+
+def parse_ssh_connections():
+    try:
+        out = subprocess.check_output("ss -tnp state established '( sport = :22 )' 2>/dev/null", shell=True, text=True, timeout=5)
+        lines = [l for l in out.split('\n') if 'pid=' in l]
+        for line in lines:
+            pid_m = re.search(r'pid=(\d+)', line)
+            if not pid_m: continue
+            pid = pid_m.group(1)
+            
+            parts = line.split()
+            peer = parts[4] if len(parts) > 4 else ""
+            ip = peer.split(':')[0] if ':' in peer else ""
+            
+            cmd = subprocess.check_output(f"ps -p {pid} -o command= 2>/dev/null", shell=True, text=True, timeout=2).strip()
+            m = re.search(r'sshd:\s+([a-zA-Z0-9_\-]+)', cmd)
+            if m and ip:
+                u = m.group(1)
+                if u not in user_ips: user_ips[u] = {}
+                user_ips[u][ip] = time.time()
+    except: pass
+
+def enforce_limits():
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    c = conn.cursor()
+    c.execute("SELECT username, max_connections FROM users WHERE status=1")
+    limits = {row[0]: row[1] for row in c.fetchall()}
+    conn.close()
+
+    now = time.time()
+    
+    for u in list(user_ips.keys()):
+        for ip in list(user_ips[u].keys()):
+            if now - user_ips[u][ip] > IP_TIMEOUT:
+                del user_ips[u][ip]
+        if not user_ips[u]:
+            del user_ips[u]
+
+    for u, limit in limits.items():
+        if limit <= 0: continue
+        
+        active_ips = user_ips.get(u, {})
+        sorted_ips = sorted(active_ips.keys(), key=lambda x: active_ips[x])
+        
+        if len(sorted_ips) > limit:
+            excess_ips = sorted_ips[limit:]
+            for ip in excess_ips:
+                if ip not in blocked_ips:
+                    subprocess.run(f"iptables -I INPUT -s {ip} -j DROP 2>/dev/null", shell=True)
+                    blocked_ips.add(ip)
+                    print(f"[!] Blocked IP {ip} for user {u} (Limit: {limit})")
+
+    all_active_ips = set()
+    for u, ips in user_ips.items():
+        all_active_ips.update(ips.keys())
+        
+    for ip in list(blocked_ips):
+        if ip not in all_active_ips:
+            subprocess.run(f"iptables -D INPUT -s {ip} -j DROP 2>/dev/null", shell=True)
+            blocked_ips.remove(ip)
+            print(f"[✓] Unblocked IP {ip}")
 
 def main():
-    logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(levelname)s %(message)s')
-    lock = open('/root/ssh-panel/ip_manager.lock', 'a')
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        print("[!] IP Manager already running")
         return
-    clean_legacy_rules()
-    reader, firewall = SnapshotReader(ONLINE_FILE), Firewall()
-    stopping = False
-    def stop(signum, frame):
-        nonlocal stopping
-        stopping = True
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    try:
-        while not stopping:
-            try:
-                snapshot = reader.read()
-                desired = desired_blocks(snapshot)
-                ports = snapshot.get('ports', firewall.ports or [22])
-                if firewall.apply(desired, ports):
-                    atomic_json(STATE_FILE, {'version': 2, 'blocked_ips': sorted(desired)})
-            except Exception as error:
-                logger.warning('Limiter sample failed: %s', error)
-            until = time.monotonic() + 5
-            while not stopping and time.monotonic() < until:
-                time.sleep(min(0.25, max(0, until - time.monotonic())))
-    finally:
-        firewall.clear()
-        lock.close()
 
+    print("[*] Smart IP Manager started")
+    load_state()
+    while True:
+        try:
+            parse_xray_log()
+            parse_ssh_connections()
+            enforce_limits()
+            save_state()
+        except Exception as e:
+            print(f"Loop error: {e}")
+        time.sleep(POLL_INTERVAL)
 
 if __name__ == '__main__':
     main()
@@ -2049,300 +1887,11 @@ rm -f /etc/nginx/sites-enabled/default 2>/dev/null
 # ============================================
 # STEP 13: Start Services
 # ============================================
-mkdir -p "/root/ssh-panel"
-cat << 'OP_FIX_1' > "/root/ssh-panel/telemetry.py"
-#!/usr/bin/env python3
-"""Shared, bounded telemetry; no process scans in HTTP/limiter paths."""
-import ipaddress
-import json
-import os
-import re
-import tempfile
-import time
-from datetime import datetime
-
-ONLINE_TTL = 30
-SNAPSHOT_TTL = 20
-EMAIL_RE = re.compile(r'\bemail:\s*(\S+)')
-SOURCE_RE = re.compile(r'(?:\bfrom\s+)?((?:tcp:|udp:)?(?:\[[^\]]+\]|[0-9a-fA-F.:]+):\d+)\s+accepted\b')
-TIMESTAMP_RE = re.compile(r'^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)')
-
-
-def canonical_ip(value):
-    try:
-        address = ipaddress.ip_address(str(value).strip('[]').split('%', 1)[0])
-        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-            address = address.ipv4_mapped
-        return str(address)
-    except ValueError:
-        return None
-
-
-def endpoint(value):
-    value = re.sub(r'^(?:tcp|udp):', '', value)
-    try:
-        host, port = value.rsplit(':', 1)
-        address = canonical_ip(host)
-        port = int(port)
-        return (address, port) if address and 0 <= port <= 65535 else None
-    except (ValueError, AttributeError):
-        return None
-
-
-def atomic_json(path, data):
-    directory = os.path.dirname(path) or '.'
-    fd, temporary = tempfile.mkstemp(prefix='.' + os.path.basename(path), dir=directory)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(data, stream, separators=(',', ':'))
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-class SnapshotReader:
-    def __init__(self, path, ttl=SNAPSHOT_TTL):
-        self.path, self.ttl = path, ttl
-        self.signature, self.data = None, {}
-
-    def read(self, now=None):
-        now = time.time() if now is None else now
-        try:
-            stat = os.stat(self.path)
-            signature = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
-            if signature != self.signature:
-                with open(self.path, encoding='utf-8') as stream:
-                    data = json.load(stream)
-                if not isinstance(data, dict) or not isinstance(data.get('users'), dict):
-                    return {}
-                self.data, self.signature = data, signature
-            if not 0 <= now - float(self.data.get('last_update', 0)) <= self.ttl:
-                return {}
-            return self.data
-        except (OSError, ValueError, TypeError):
-            return {}
-
-
-def online_view(snapshot, now=None):
-    now = time.time() if now is None else now
-    result = {}
-    for username, info in snapshot.get('users', {}).items():
-        try:
-            if not 0 <= now - float(info.get('ts', 0)) <= SNAPSHOT_TTL:
-                continue
-            ssh_count = max(0, int(info.get('ssh', 0)))
-            is_xray = bool(info.get('xray', False))
-            xray_count = max(0, int(info.get('xray_ips', 0)))
-            if not ssh_count and not is_xray:
-                continue
-            count = info.get('online_count')
-            if count is None:
-                count = ssh_count + xray_count
-            result[username] = {
-                'ssh': bool(ssh_count), 'xray': is_xray,
-                'ssh_count': ssh_count, 'xray_ips': xray_count,
-                'is_online': True, 'online_count': max(1, int(count)),
-            }
-        except (ValueError, TypeError, AttributeError):
-            continue
-    return result
-
-
-class BoundedLogReader:
-    def __init__(self, path, cursor_path, max_bytes=1024 * 1024):
-        self.path, self.cursor_path, self.max_bytes = path, cursor_path, max_bytes
-        self.cursor = None
-        try:
-            with open(cursor_path) as stream:
-                value = json.load(stream)
-            if isinstance(value, dict):
-                self.cursor = value
-        except (OSError, ValueError):
-            pass
-
-    def read(self):
-        try:
-            with open(self.path, 'rb') as stream:
-                stat = os.fstat(stream.fileno())
-                identity = [stat.st_dev, stat.st_ino]
-                if self.cursor is None:
-                    # Historical records must not become current online users.
-                    self.cursor = {'identity': identity, 'pos': stat.st_size}
-                    atomic_json(self.cursor_path, self.cursor)
-                    return []
-                position = int(self.cursor.get('pos', 0))
-                if self.cursor.get('identity') != identity or position > stat.st_size:
-                    position = 0
-                skip_partial = stat.st_size - position > self.max_bytes
-                if skip_partial:
-                    position = stat.st_size - self.max_bytes
-                if position >= stat.st_size:
-                    return []
-                stream.seek(position)
-                data = stream.read(self.max_bytes)
-                end = data.rfind(b'\n') + 1
-                if not end:
-                    if len(data) == self.max_bytes:
-                        end = len(data)
-                    else:
-                        return []
-                self.cursor = {'identity': identity, 'pos': position + end}
-                atomic_json(self.cursor_path, self.cursor)
-                lines = data[:end].decode('utf-8', errors='replace').splitlines()
-                return lines[1:] if skip_partial else lines
-        except (OSError, ValueError, TypeError):
-            return []
-
-
-def log_activity(lines, aliases, now=None):
-    now = time.time() if now is None else now
-    result = {}
-    for line in lines:
-        email, source = EMAIL_RE.search(line), SOURCE_RE.search(line)
-        if not email or not source or email.group(1) not in aliases:
-            continue
-        parsed = endpoint(source.group(1))
-        if not parsed:
-            continue
-        timestamp = now
-        match = TIMESTAMP_RE.match(line)
-        if match:
-            try:
-                value = match.group(1)
-                fmt = '%Y/%m/%d %H:%M:%S.%f' if '.' in value else '%Y/%m/%d %H:%M:%S'
-                timestamp = datetime.strptime(value, fmt).timestamp()
-            except ValueError:
-                continue
-        if 0 <= now - timestamp <= ONLINE_TTL:
-            result.setdefault(aliases[email.group(1)], {})[parsed[0]] = timestamp
-    return result
-OP_FIX_1
-mkdir -p "/root/ssh-panel/static"
-cat << 'OP_FIX_6' > "/root/ssh-panel/static/online-status.js"
-/* Refresh the existing v3.7 indicators. No template, style or layout changes. */
-(function () {
-  'use strict';
-  var timer = null;
-  var last = '';
-  var inFlight = false;
-
-  function render(data) {
-    var signature = JSON.stringify(data);
-    if (signature === last) return;
-    last = signature;
-    var lookup = Object.create(null);
-    Object.keys(data).forEach(function (username) { lookup[username.toLowerCase()] = data[username]; });
-    document.querySelectorAll('tbody tr[data-username], .mobile-card [data-username]').forEach(function (row) {
-      var info = lookup[row.getAttribute('data-username')] || {};
-      var online = !!info.is_online;
-      row.setAttribute('data-online', online ? '1' : '0');
-      var dot = row.querySelector('span.w-2\\.5');
-      if (dot) {
-        dot.classList.toggle('bg-emerald-500', online);
-        dot.classList.toggle('pulse-dot', online);
-        dot.classList.toggle('bg-gray-700', !online);
-        if (row.tagName === 'TR') {
-          dot.classList.toggle('shadow-lg', online);
-          dot.classList.toggle('shadow-emerald-500/50', online);
-        }
-        var group = dot.parentElement;
-        Array.from(group.querySelectorAll('span')).forEach(function (badge) {
-          if (badge.classList.contains('text-[9px]') && /^(SSH|V2Ray|V2R)$/.test(badge.textContent.trim())) badge.remove();
-        });
-        var desktop = row.tagName === 'TR';
-        [['ssh', 'SSH', 'emerald'], ['xray', desktop ? 'V2Ray' : 'V2R', 'purple']].forEach(function (spec) {
-          if (!info[spec[0]]) return;
-          var badge = document.createElement('span');
-          badge.textContent = spec[1];
-          badge.className = 'text-[9px] bg-' + spec[2] + '-900/40 text-' + spec[2] + '-400 px-1.5 py-0.5 rounded' +
-            (desktop ? ' border border-' + spec[2] + '-700/30' : '');
-          group.appendChild(badge);
-        });
-      }
-      var counter = row.tagName === 'TR' ? row.querySelector('td:nth-child(3) span') :
-        row.querySelector('.grid > div:nth-child(2) span.font-mono');
-      if (counter) {
-        var maximum = counter.textContent.split('/').pop().trim();
-        counter.textContent = (online ? (Number(info.online_count) || 1) : 0) + '/' + maximum;
-        if (row.tagName === 'TR') {
-          counter.classList.toggle('text-emerald-400', online);
-          counter.classList.toggle('border-emerald-800/30', online);
-          counter.classList.toggle('text-red-400', !online);
-          counter.classList.toggle('border-red-900/30', !online);
-        }
-      }
-    });
-    if (typeof window.filterUsers === 'function') window.filterUsers();
-  }
-
-  async function poll() {
-    if (document.hidden || inFlight) return;
-    inFlight = true;
-    var controller = new AbortController();
-    var timeout = setTimeout(function () { controller.abort(); }, 4000);
-    try {
-      var response = await fetch('/api/online', {cache: 'no-store', signal: controller.signal});
-      if (response.status === 401) return;
-      if (response.ok) render(await response.json());
-    } catch (error) {
-      /* Keep the last result on a transient network failure. */
-    } finally {
-      inFlight = false;
-      clearTimeout(timeout);
-      if (!document.hidden) timer = setTimeout(poll, 5000);
-    }
-  }
-  document.addEventListener('visibilitychange', function () {
-    clearTimeout(timer);
-    if (!document.hidden) poll();
-  });
-  poll();
-}());
-OP_FIX_6
-mkdir -p "/etc/logrotate.d"
-cat << 'OP_FIX_9' > "/etc/logrotate.d/ssh-panel-xray"
-/tmp/xray_access.log /tmp/xray_error.log {
-    daily
-    maxsize 32M
-    rotate 3
-    missingok
-    notifempty
-    compress
-    delaycompress
-    copytruncate
-    su root root
-}
-OP_FIX_9
-mkdir -p "/etc/systemd/system"
-cat << 'OP_FIX_10' > "/etc/systemd/system/ssh-panel-logrotate.service"
-[Unit]
-Description=Rotate OutlineParsian Xray logs
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/logrotate --state /var/lib/logrotate/ssh-panel-xray.status /etc/logrotate.d/ssh-panel-xray
-OP_FIX_10
-mkdir -p "/etc/systemd/system"
-cat << 'OP_FIX_11' > "/etc/systemd/system/ssh-panel-logrotate.timer"
-[Unit]
-Description=Check OutlineParsian log size every 5 minutes
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=5min
-
-[Install]
-WantedBy=timers.target
-OP_FIX_11
-
 echo "[13/16] Starting all services..."
-python3 /root/ssh-panel/sync_xray.py
 systemctl daemon-reload
 systemctl enable xray ssh-panel ssh-panel-worker ssh-panel-ip-manager nginx iran-block.service 2>/dev/null
 systemctl restart xray ssh-panel-worker ssh-panel-ip-manager ssh-panel nginx
 systemctl start iran-block.service 2>/dev/null
-systemctl enable --now ssh-panel-logrotate.timer
 
 sleep 4
 
@@ -2371,9 +1920,21 @@ echo "║  🌐 Panel:  http://${IP}:5000"
 echo "║  👤 User:   admin      🔑 Pass: admin123"
 echo "╠══════════════════════════════════════════════════════╣"
 echo "║  🚀 NEW IN v3.7:                                     ║"
-echo "║  ✅ CPU and Online Status Backend Repair             ║"
+echo "║  ✅ Fixed Syntax Error in Settings Route             ║"
 echo "║                                                      ║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
 echo "  🚀 Panel is ready! Open in browser."
 echo ""
+
+
+# ============================================
+# CPU Watchdog (log only, no automatic kill)
+# ============================================
+cat << 'WATCHDOG' > /usr/local/bin/outlineparsian-watchdog.sh
+#!/bin/bash
+LOG="/var/log/panel.log"
+CPU=$(ps -eo pcpu,comm --sort=-pcpu | head -2 | tail -1)
+echo "$(date) CPU Monitor: $CPU" >> "$LOG"
+WATCHDOG
+chmod +x /usr/local/bin/outlineparsian-watchdog.sh
