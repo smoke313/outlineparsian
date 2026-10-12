@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================
-# OutlineParsian Ultimate Panel v3.7
+# OutlineParsian Ultimate Panel v3.8
 # Complete Installation | All Bugs Fixed
 # SSH + Xray Traffic | Accurate Online | IP-Based Limiter
 # ============================================
@@ -14,12 +14,12 @@ cat << "BANNER"
  | |__| | |__| | |\  |   | |__| |_| | |    \____| | |  \____|_| \_\   \_\____/|_| \_|
   \____/ \____/|_| \_| |_____\___/|_|          |_|
   
-  OutlineParsian Ultimate Panel v3.7
+  OutlineParsian Ultimate Panel v3.8
 BANNER
 
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
-echo "║   OutlineParsian Ultimate Panel v3.7                 ║"
+echo "║   OutlineParsian Ultimate Panel v3.8                 ║"
 echo "║   Fixed: Syntax Error in Settings Route              ║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
@@ -103,11 +103,10 @@ c.execute('''CREATE TABLE IF NOT EXISTS xray_clients (id INTEGER PRIMARY KEY AUT
 c.execute('''CREATE TABLE IF NOT EXISTS user_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT, created_at TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS group_members (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, username TEXT, FOREIGN KEY (group_id) REFERENCES user_groups(id) ON DELETE CASCADE, FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE)''')
 c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-defaults = [('domain',''),('admin_username','admin'),('admin_password','admin123'),('block_iran_client','0'),('panel_port','5000'),('reality_public_key',''),('reality_private_key',''),('ssl_domain',''),('ssl_status','none'),('panel_secret','')]
+defaults = [('domain',''),('admin_username','admin'),('admin_password','admin123'),('block_iran_client','0'),('panel_port','5000'),('reality_public_key',''),('reality_private_key',''),('ssl_domain',''),('ssl_status','none')]
 for k,v in defaults: c.execute("INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)",(k,v))
 c.execute("CREATE INDEX IF NOT EXISTS idx_clients_inbound ON xray_clients(inbound_id)")
 c.execute("CREATE INDEX IF NOT EXISTS idx_clients_username ON xray_clients(username)")
-conn.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('panel_secret','')")
 conn.commit()
 conn.close()
 print("✓ Database initialized")
@@ -121,6 +120,7 @@ cat << 'EOF' > /root/ssh-panel/sync_xray.py
 #!/usr/bin/env python3
 import sqlite3, json, os, subprocess
 
+DB_PATH = '/root/ssh-panel/panel.db'
 XRAY_CONFIG = '/usr/local/etc/xray/config.json'
 
 def generate():
@@ -238,7 +238,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger('OP')
 
 app = Flask(__name__)
-app.secret_key = get_setting('panel_secret') if os.path.exists(DB_PATH) and get_setting('panel_secret') else os.urandom(32).hex()
+app.secret_key = os.urandom(24).hex()
 
 DB_PATH = '/root/ssh-panel/panel.db'
 XRAY_CONFIG = '/usr/local/etc/xray/config.json'
@@ -265,8 +265,7 @@ def update_system_stats():
             pass
         time.sleep(2)
 
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
-    threading.Thread(target=update_system_stats, daemon=True).start()
+threading.Thread(target=update_system_stats, daemon=True).start()
 
 def get_cpu(): return system_stats.get('cpu', 0)
 def get_ram(): return system_stats.get('ram', 0)
@@ -334,7 +333,7 @@ def create_system_user(username, password):
         result = subprocess.run(['id', username], capture_output=True, timeout=5)
         if result.returncode != 0:
             subprocess.run(['useradd', '-m', '-s', '/bin/bash', username], check=True, timeout=10)
-        subprocess.run(['chpasswd'], input=f'{username}:{password}\n', text=True, check=True, timeout=5)
+        subprocess.run(f"echo '{username}:{password}' | chpasswd", shell=True, check=True, timeout=5)
         return True
     except:
         return False
@@ -385,15 +384,7 @@ def generate_qr_base64(data):
         except: return ""
 
 def sync_xray():
-    try:
-        subprocess.run(
-            ["python3", "/root/ssh-panel/sync_xray.py"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=15
-        )
-    except Exception as e:
-        logger.error(f"Xray sync failed: {e}")
+    subprocess.run(["python3", "/root/ssh-panel/sync_xray.py"], timeout=15)
 
 def gen_link(proto,uid,dom,port,net,sec,sni,fp,sid,pub,path,user):
     if proto == 'vless':
@@ -1081,7 +1072,7 @@ if __name__=='__main__':
     apply_iran_block()
     sync_users_from_db()
     logger.info(f"Panel starting on port {get_panel_port()}")
-    app.run(host='0.0.0.0', port=get_panel_port(), debug=False, threaded=False)
+    app.run(host='0.0.0.0', port=get_panel_port(), debug=False, threaded=True)
 APPEOF
 
 echo "✓ Panel application created"
@@ -1137,6 +1128,7 @@ echo "[9/16] Creating traffic worker v3.7..."
 cat << 'WORKEREOF' > /root/ssh-panel/traffic_worker.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# v3.8 DEBUG BUILD: reduced polling pressure, safer online tracking
 import sys, time, sqlite3, subprocess, re, json, os
 from datetime import datetime
 
@@ -1152,13 +1144,12 @@ except Exception as e:
 
 DB_PATH = "/root/ssh-panel/panel.db"
 ONLINE_FILE = "/tmp/online_users.json"
-WORKER_LOCK = "/tmp/traffic_worker.lock"
 SSH_SESSIONS_FILE = "/tmp/ssh_sessions.json"
 XRAY_LOG_PATH = "/tmp/xray_access.log"
 XRAY_LOG_POS = "/tmp/xray_log_pos.txt"
 
-POLL_INTERVAL = 3
-ONLINE_TTL = 30
+POLL_INTERVAL = 10
+ONLINE_TTL = 15
 
 SSH_SESSIONS = {}
 ONLINE_USERS = {}
@@ -1291,7 +1282,7 @@ def get_ssh_traffic():
 
         username = None
         try:
-            cmd = subprocess.check_output(f"ps -p {pid} -o command= 2>/dev/null", shell=True, text=True, timeout=2).strip()
+            cmd = ""  # v3.8: avoid expensive ps spawn per SSH connection
             if cmd:
                 m = re.search(r'sshd:\s+([a-zA-Z0-9_\-]+)', cmd)
                 if m:
@@ -1366,7 +1357,7 @@ def update_usage(user_traffic):
             
             if deactivate and int(status) == 1:
                 c.execute("UPDATE users SET status = 0 WHERE username = ?", (username,))
-                subprocess.run(["pkill", "-u", username], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                subprocess.run(f"pkill -u {username} 2>/dev/null", shell=True)
                 deactivated_any = True
         conn.commit()
         conn.close()
@@ -1375,20 +1366,11 @@ def update_usage(user_traffic):
     return deactivated_any
 
 def main():
-    try:
-        fd = os.open(WORKER_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-    except FileExistsError:
-        print("[!] Worker already running")
-        return
-
     print("[*] OutlineParsian Worker v3.7 started")
     load_state()
     prime_xray_stats()
     time.sleep(1)
 
-    last_db_sync = 0
     while True:
         try:
             now = time.time()
@@ -1432,18 +1414,9 @@ def main():
                     ONLINE_USERS[u]['ssh'] = cnt
                     ONLINE_USERS[u]['ts'] = now
             
-            if now - last_db_sync >= 3 and update_usage(traffic):
-                last_db_sync = now
+            if update_usage(traffic):
                 print("[*] User deactivated, syncing Xray to block them...")
-                try:
-        subprocess.run(
-            ["python3", "/root/ssh-panel/sync_xray.py"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=15
-        )
-    except Exception as e:
-        logger.error(f"Xray sync failed: {e}")
+                subprocess.run(["python3", "/root/ssh-panel/sync_xray.py"], timeout=15)
             
             cleanup_online()
             save_state()
@@ -1457,20 +1430,6 @@ if __name__ == '__main__':
 WORKEREOF
 chmod +x /root/ssh-panel/traffic_worker.py
 echo "✓ Worker created"
-
-# CPU protection: rotate Xray logs to prevent unlimited parsing growth
-cat << 'LOGROT' > /etc/logrotate.d/outlineparsian-xray
-/tmp/xray_access.log /tmp/xray_error.log {
-    daily
-    rotate 7
-    size 50M
-    copytruncate
-    compress
-    missingok
-    notifempty
-}
-LOGROT
-
 
 # ============================================
 # STEP 10: Smart IP Manager v3.7
@@ -1556,7 +1515,7 @@ def parse_ssh_connections():
             peer = parts[4] if len(parts) > 4 else ""
             ip = peer.split(':')[0] if ':' in peer else ""
             
-            cmd = subprocess.check_output(f"ps -p {pid} -o command= 2>/dev/null", shell=True, text=True, timeout=2).strip()
+            cmd = ""  # v3.8: avoid expensive ps spawn per SSH connection
             m = re.search(r'sshd:\s+([a-zA-Z0-9_\-]+)', cmd)
             if m and ip:
                 u = m.group(1)
@@ -1605,14 +1564,6 @@ def enforce_limits():
             print(f"[✓] Unblocked IP {ip}")
 
 def main():
-    try:
-        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-    except FileExistsError:
-        print("[!] IP Manager already running")
-        return
-
     print("[*] Smart IP Manager started")
     load_state()
     while True:
@@ -1912,7 +1863,7 @@ IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║                                                      ║"
-echo "║   ✅ OutlineParsian Ultimate Panel v3.7              ║"
+echo "║   ✅ OutlineParsian Ultimate Panel v3.8              ║"
 echo "║   Installation Complete!                             ║"
 echo "║                                                      ║"
 echo "╠══════════════════════════════════════════════════════╣"
@@ -1926,15 +1877,3 @@ echo "╚═══════════════════════�
 echo ""
 echo "  🚀 Panel is ready! Open in browser."
 echo ""
-
-
-# ============================================
-# CPU Watchdog (log only, no automatic kill)
-# ============================================
-cat << 'WATCHDOG' > /usr/local/bin/outlineparsian-watchdog.sh
-#!/bin/bash
-LOG="/var/log/panel.log"
-CPU=$(ps -eo pcpu,comm --sort=-pcpu | head -2 | tail -1)
-echo "$(date) CPU Monitor: $CPU" >> "$LOG"
-WATCHDOG
-chmod +x /usr/local/bin/outlineparsian-watchdog.sh
